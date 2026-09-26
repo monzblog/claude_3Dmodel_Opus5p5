@@ -1,0 +1,6 @@
+bpy==5.0.1
+numpy
+shapely>=2.0
+pyproj
+scipy
+requests
