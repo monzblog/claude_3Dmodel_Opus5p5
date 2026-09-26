@@ -5,6 +5,7 @@
     python -m c1gen.build --synthetic      # 仮データ（楕円の周回）で動作確認
 """
 import argparse
+import re
 import json
 import os
 
@@ -17,6 +18,7 @@ from . import config as C
 from . import dem as dem_mod
 from . import geom as G
 from . import osm
+from . import sections as S
 from .proj import to_latlon
 from .route import Route, _gauss, loop_profile, ramp_profile
 
@@ -167,7 +169,36 @@ def _blocker(routes):
     return blocked
 
 
-def build_scene(loops, ramps):
+def _dot_progress(r, sharp):
+    """急カーブの手前 DOT_ZONE の区間で 0→1 に増える値（区間外は NaN）。"""
+    n = len(r.s)
+    prog = np.full(n, np.nan)
+    prev = np.roll(sharp, 1) if r.closed else np.concatenate([[False], sharp[:-1]])
+    L = int(C.DOT_ZONE / r.step)
+    for i0 in np.flatnonzero(sharp & ~prev):
+        for k in range(L):
+            j = i0 - L + k
+            if not r.closed and j < 0:
+                continue
+            j %= n
+            if not sharp[j] and not r.tunnel[j]:
+                prog[j] = k / L
+    return prog
+
+
+def _twin_sides(r, others, margin=6.0):
+    """左右それぞれ、すぐ隣を同じ高さで別の本線が並走している点を返す（掘割の中央側など）。"""
+    out = {1: np.zeros(len(r.s), bool), -1: np.zeros(len(r.s), bool)}
+    for o in others:
+        d, k = cKDTree(o.P).query(r.P)
+        lat = np.einsum("ij,ij->i", o.P[k] - r.P, r.N)
+        close = (d < G.half_width(r) + G.half_width(o)[k] + 2 * C.BARRIER_BASE + margin) & (np.abs(o.z[k] - r.z) < 3.0)
+        out[1] |= close & (lat > 0)
+        out[-1] |= close & (lat < 0)
+    return out
+
+
+def build_scene(loops, ramps, water_path=None):
     layers = {}
     texts = []
     main_poly = {id(r): _deck_polygon(r) for r in loops}
@@ -175,26 +206,50 @@ def build_scene(loops, ramps):
 
     for r in loops:
         L = layers.setdefault(f"C1_{r.name}", Layer())
+        n = f"C1_{r.name}"
         mine = [q for q in ramps if q.main is r]
         ramp_poly = _union_buffer([(q.P[: int(150 / q.step)], float(q.width.max() / 2)) for q in mine])
         allseg = np.ones(len(r.s), bool)
-        G.deck(L.mesh(f"C1_{r.name}_Road", "Asphalt"), r, allseg)
-        G.markings(L.mesh(f"C1_{r.name}_Markings", "Marking"), r, allseg)
+        kind = S.wall_types(r, water_path)
+        curv = S.curvature(r)
+        sharp = (np.abs(curv) > 1.0 / C.SHARP_CURVE_RADIUS) & ~r.tunnel
+        ban = S.no_lane_change(r, [q.junction for q in mine])
+
+        G.deck(L.mesh(f"{n}_Road", "Asphalt"), r, allseg)
+        G.markings(L.mesh(f"{n}_Markings", "Marking"), L.mesh(f"{n}_MarkingsYellow", "MarkingYellow"),
+                   r, allseg, no_change=ban)
+        G.color_pavement(L.mesh(f"{n}_RedPavement", "RedPavement"), r, S.dilate(sharp, 10, r.step, True))
+        G.slow_dots(L.mesh(f"{n}_Markings", "Marking"), r, _dot_progress(r, sharp))
+        G.joints(L.mesh(f"{n}_ExpansionJoints", "SteelJoint"), r, r.elevated)
+
         removed = {}
+        twin = _twin_sides(r, [o for o in loops if o is not r])
         for side in (1, -1):
             bp = r.P + r.N * (side * (G.half_width(r) + C.BARRIER_BASE / 2))[:, None]
             gap = _inside(ramp_poly, bp)
             removed[side] = gap
-            G.barrier(L.mesh(f"C1_{r.name}_Barriers", "Concrete"), r, side, G.seg(~gap, True))
-            G.retaining_wall(L.mesh(f"C1_{r.name}_RetainingWalls", "Concrete"), r, side,
-                             G.seg(r.cutting & ~gap, True))
-        G.deck_body(L.mesh(f"C1_{r.name}_Viaduct", "StructureConcrete"), r,
-                    G.seg(r.z - r.ground > 1.5, True))
-        G.piers(L.mesh(f"C1_{r.name}_Piers", "StructureConcrete"), r, blocked)
-        G.tunnel_shell(L.mesh(f"C1_{r.name}_Tunnel", "TunnelWall"), r, G.seg(r.tunnel, True))
-        G.portals(L.mesh(f"C1_{r.name}_Tunnel_Portals", "StructureConcrete"), r, r.tunnel)
-        G.tunnel_lights(L.mesh(f"C1_{r.name}_TunnelLights", "TunnelLight"), r)
-        G.light_poles(L.mesh(f"C1_{r.name}_LightPoles", "Metal"), L.mesh(f"C1_{r.name}_Lamps", "LampLight"),
+            G.barrier(L.mesh(f"{n}_Barriers", "Concrete"), r, side, G.seg(~gap & ~r.tunnel, True))
+            G.walkway(L.mesh(f"{n}_TunnelWalkway", "Concrete"), r, side, G.seg(r.tunnel, True))
+            # 掘割の擁壁は外側だけ。上下線が並ぶ中央側には立てない
+            G.retaining_wall(L.mesh(f"{n}_RetainingWalls", "RetainingWall"), r, side,
+                             G.seg(r.cutting & ~gap & ~twin[side], True))
+        left_ok = ~removed[1]
+        G.sound_wall(L.mesh(f"{n}_SoundWallPanels", "SoundPanel"), L.mesh(f"{n}_SoundWallClear", "ClearPanel"),
+                     L.mesh(f"{n}_SoundWallPosts", "Metal"), r, G.seg((kind == S.SOUND) & left_ok, True))
+        G.rail_fence(L.mesh(f"{n}_GuardRail", "Railing"), r, G.seg((kind == S.RAIL) & left_ok, True))
+        G.delineators(L.mesh(f"{n}_Delineators", "DelineatorWhite"), L.mesh(f"{n}_DelineatorsOrange", "DelineatorOrange"),
+                      r, left_ok & ~r.tunnel, ~removed[-1] & ~r.tunnel)
+        G.chevrons(L.mesh(f"{n}_CurveChevrons", "Chevron"), r, curv, sharp)
+
+        G.deck_body(L.mesh(f"{n}_Viaduct", "StructureConcrete"), r, G.seg(r.z - r.ground > 1.5, True))
+        G.piers(L.mesh(f"{n}_Piers", "StructureConcrete"), r, blocked)
+        G.tunnel_shell(L.mesh(f"{n}_TunnelTile", "TunnelTile"), L.mesh(f"{n}_TunnelTileLower", "TunnelTileDirty"),
+                       L.mesh(f"{n}_TunnelUpper", "TunnelUpper"), r, G.seg(r.tunnel, True))
+        G.portals(L.mesh(f"{n}_Tunnel_Portals", "StructureConcrete"), r, r.tunnel)
+        G.tunnel_lights(L.mesh(f"{n}_TunnelLights", "TunnelLight"), r)
+        G.tunnel_equipment(L.mesh(f"{n}_TunnelEquipment", "EquipBox"), L.mesh(f"{n}_TunnelEquipLamp", "EquipRed"),
+                           L.mesh(f"{n}_EvacuationGuide", "GuideGreen"), L.mesh(f"{n}_JetFans", "JetFan"), r)
+        G.light_poles(L.mesh(f"{n}_LightPoles", "Metal"), L.mesh(f"{n}_Lamps", "LampLight"),
                       r, skip=removed[1], blocked=blocked)
         _signs(L, texts, r, mine, blocked)
 
@@ -205,19 +260,75 @@ def build_scene(loops, ramps):
         zoff = np.where(in_main, -0.03, 0.0)
         allseg = np.ones(len(q.s) - 1, bool)
         G.deck(R.mesh("C1_Ramps_Road", "Asphalt"), q, allseg, zoff=zoff)
-        G.markings(R.mesh("C1_Ramps_Markings", "Marking"), q, G.seg(~in_main, False), zoff=zoff)
+        G.markings(R.mesh("C1_Ramps_Markings", "Marking"), R.mesh("C1_Ramps_MarkingsYellow", "MarkingYellow"),
+                   q, G.seg(~in_main, False), zoff=zoff)
+        ok = {}
         for side in (1, -1):
             bp = q.P + q.N * (side * (G.half_width(q) + C.BARRIER_BASE / 2))[:, None]
-            ok = ~(_inside(main_poly[id(q.main)], bp) & near)
-            G.barrier(R.mesh("C1_Ramps_Barriers", "Concrete"), q, side, G.seg(ok, False), zoff=zoff)
-            G.retaining_wall(R.mesh("C1_Ramps_RetainingWalls", "Concrete"), q, side, G.seg(q.cutting & ok, False))
+            ok[side] = ~(_inside(main_poly[id(q.main)], bp) & near)
+            G.barrier(R.mesh("C1_Ramps_Barriers", "Concrete"), q, side, G.seg(ok[side] & ~q.tunnel, False), zoff=zoff)
+            G.walkway(R.mesh("C1_Ramps_TunnelWalkway", "Concrete"), q, side, G.seg(q.tunnel & ~in_main, False))
+            G.retaining_wall(R.mesh("C1_Ramps_RetainingWalls", "RetainingWall"), q, side,
+                             G.seg(q.cutting & ok[side], False))
+        G.delineators(R.mesh("C1_Ramps_Delineators", "DelineatorWhite"), R.mesh("C1_Ramps_DelineatorsOrange", "DelineatorOrange"),
+                      q, ok[1] & ~q.tunnel, ok[-1] & ~q.tunnel)
         G.deck_body(R.mesh("C1_Ramps_Viaduct", "StructureConcrete"), q,
                     G.seg((q.z - q.ground > 1.5) & ~in_main, False), zoff=zoff)
         G.piers(R.mesh("C1_Ramps_Piers", "StructureConcrete"), q, blocked)
-        G.tunnel_shell(R.mesh("C1_Ramps_Tunnel", "TunnelWall"), q, G.seg(q.tunnel & ~in_main, False))
+        G.tunnel_shell(R.mesh("C1_Ramps_TunnelTile", "TunnelTile"), R.mesh("C1_Ramps_TunnelTileLower", "TunnelTileDirty"),
+                       R.mesh("C1_Ramps_TunnelUpper", "TunnelUpper"), q, G.seg(q.tunnel & ~in_main, False))
         G.portals(R.mesh("C1_Ramps_Tunnel_Portals", "StructureConcrete"), q, q.tunnel & ~in_main)
         G.tunnel_lights(R.mesh("C1_Ramps_TunnelLights", "TunnelLight"), q)
+        _gore(R, q, ok)
     return layers, texts
+
+
+def _gore(R, q, ok):
+    """分岐・合流部の導流帯（ゼブラ）と、分岐の先端のクッションドラム。"""
+    main = q.main
+    j = q.junction
+    k = min(len(q.P) - 1, int(60 / q.step))
+    toward = 1 if np.dot(main.P[j] - q.P[k], q.N[k]) >= 0 else -1  # ランプから見た本線の側
+    nose = np.flatnonzero(ok[toward] & (q.s > 5))
+    if not len(nose):
+        return
+    i_nose = int(nose[0])
+    hq = G.half_width(q)
+    edge_q = q.P + q.N * (toward * (hq - C.SHOULDER_LEFT))[:, None]
+    _, kk = cKDTree(main.P).query(edge_q[: i_nose + 1])
+    hm = G.half_width(main)[kk]
+    # 本線の、ランプ側の車道外側線
+    side_m = np.sign(np.einsum("ij,ij->i", edge_q[: i_nose + 1] - main.P[kk], main.N[kk]))
+    edge_m = main.P[kk] + main.N[kk] * (side_m * (hm - C.SHOULDER_LEFT))[:, None]
+    lat_q = np.abs(np.einsum("ij,ij->i", edge_q[: i_nose + 1] - main.P[kk], main.N[kk]))
+    outside = lat_q > hm - C.SHOULDER_LEFT + 0.5
+    every = max(1, int(round(C.GORE_ZEBRA_SPACING / q.step)))
+    shift = max(1, int(round(5.0 / q.step)))
+    a, b = [], []
+    for i in range(0, i_nose + 1 - shift, every):
+        if outside[i]:
+            a.append(edge_m[i])
+            b.append(edge_q[min(i + shift, i_nose)])
+    G.gore_zebra(R.mesh("C1_Ramps_GoreZebra", "Marking"), np.array(a), np.array(b), float(q.z[0]) + C.MARK_LIFT * 0.2)
+    if q.kind == "diverge" and not q.tunnel[i_nose]:
+        c = q.P[i_nose] + q.N[i_nose] * toward * (hq[i_nose] + C.BARRIER_BASE / 2) - q.T[i_nose] * 1.2
+        G.cushion_drums(R.mesh("C1_Ramps_CushionDrums", "CushionDrum"), c, q.T[i_nose], float(q.z[i_nose]))
+
+
+def sign_label(dest):
+    """OSM の行き先を案内標識の文字にする（例: 首都高速4号新宿線 → 4 新宿、霞が関出口 → 霞が関）。
+
+    C1 どうしの分かれ道（車線が分かれるだけの所）は None。
+    """
+    if not dest:
+        return ""
+    if "都心環状線" in dest:
+        return None
+    m = re.match(r"首都高速(\d+)号(.+?)線", dest)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+    parts = [p for p in dest.split(";") if p][:2]
+    return " ".join(p[:-2] if p.endswith(("出口", "入口")) else p for p in parts)
 
 
 def _signs(L, texts, r, ramps, blocked):
@@ -225,13 +336,18 @@ def _signs(L, texts, r, ramps, blocked):
     panels = L.mesh(f"C1_{r.name}_SignPanels", "SignGreen")
     n = len(r.s)
     for q in ramps:
-        dest = q.destination or "出口"
+        dest = sign_label(q.destination)
+        if dest is None:
+            continue
+        dest = dest or "出口"
         if q.kind == "diverge":
-            for dist, extra in ((C.SIGN_ADVANCE, f"{int(C.SIGN_ADVANCE)}m"), (40.0, "出口" if q.side > 0 else "右 出口")):
+            exit_word = "出口" if q.side > 0 else "右 出口"
+            for dist, extra in ((C.SIGN_ADVANCE, f"{exit_word} {int(C.SIGN_ADVANCE)}m"), (40.0, exit_word)):
                 i = (q.junction - int(dist / r.step)) % n
                 over = blocked(r, r.P[i], r.z[i] + 0.5, r.z[i] + C.SIGN_CLEARANCE + 3.0 + C.DECK_THICKNESS)
                 if not r.tunnel[i] and not over:
-                    G.gantry(frames, panels, texts, r, i, [dest, extra], q.side)
+                    lines = [dest, extra] if dest != "出口" else [extra]
+                    G.gantry(frames, panels, texts, r, i, lines, q.side)
         else:
             i = (q.junction - int(120 / r.step)) % n
             G.warning_sign(frames, L.mesh(f"C1_{r.name}_SignYellow", "SignYellow"), texts, r, i, q.side, "合流")
@@ -346,6 +462,7 @@ def main():
         if args.fetch:
             print("OSM を取得中…")
             osm.fetch(osm_path)
+            osm.fetch_water(os.path.join(DATA, "osm_water.json"))
             print("標高タイルを取得中…")
             dem_mod.fetch(dem_root)
         dem = dem_mod.DEM(dem_root)
@@ -361,7 +478,7 @@ def main():
               f"トンネル {r.tunnel.mean():.0%}, 掘割 {r.cutting.mean():.0%}")
     print(f"分岐 {sum(q.kind == 'diverge' for q in ramps)} 本, 合流 {sum(q.kind == 'merge' for q in ramps)} 本")
 
-    layers, texts = build_scene(loops, ramps)
+    layers, texts = build_scene(loops, ramps, os.path.join(DATA, "osm_water.json"))
     ground = terrain(loops + ramps, dem)
     lanes_json(loops + ramps, os.path.splitext(args.out)[0] + "_lanes.json")
 

@@ -3,17 +3,35 @@ import bpy
 import numpy as np
 
 from .geom import Mesh
+from .textures import TILES
 
-# 名前: (RGBA, 粗さ, 発光の強さ)
+# 名前: (RGBA, 粗さ, 発光の強さ)。テクスチャを使う材質は textures.TILES にも同じ名前がある
 MATERIALS = {
     "Asphalt": ((0.06, 0.06, 0.065, 1), 0.9, 0),
+    "RedPavement": ((0.5, 0.12, 0.1, 1), 0.85, 0),
     "Marking": ((0.9, 0.9, 0.88, 1), 0.6, 0),
+    "MarkingYellow": ((0.95, 0.68, 0.05, 1), 0.6, 0),
     "Concrete": ((0.55, 0.55, 0.53, 1), 0.85, 0),
+    "RetainingWall": ((0.5, 0.5, 0.48, 1), 0.9, 0),
     "StructureConcrete": ((0.45, 0.45, 0.44, 1), 0.9, 0),
-    "TunnelWall": ((0.75, 0.75, 0.72, 1), 0.5, 0),
+    "SoundPanel": ((0.7, 0.7, 0.67, 1), 0.5, 0),
+    "ClearPanel": ((0.75, 0.82, 0.85, 0.25), 0.05, 0),
+    "Railing": ((0.72, 0.74, 0.74, 1), 0.4, 0),
+    "TunnelTile": ((0.85, 0.85, 0.82, 1), 0.3, 0),
+    "TunnelTileDirty": ((0.6, 0.6, 0.57, 1), 0.5, 0),
+    "TunnelUpper": ((0.3, 0.3, 0.3, 1), 0.9, 0),
+    "EquipBox": ((0.85, 0.83, 0.75, 1), 0.5, 0),
+    "EquipRed": ((0.9, 0.05, 0.02, 1), 0.4, 4.0),
+    "GuideGreen": ((0.1, 0.8, 0.3, 1), 0.4, 3.0),
+    "JetFan": ((0.55, 0.57, 0.6, 1), 0.35, 0),
+    "SteelJoint": ((0.25, 0.25, 0.27, 1), 0.35, 0),
+    "DelineatorWhite": ((0.95, 0.95, 0.95, 1), 0.2, 0.5),
+    "DelineatorOrange": ((1.0, 0.45, 0.05, 1), 0.2, 0.5),
+    "Chevron": ((0.95, 0.75, 0.05, 1), 0.5, 0),
+    "CushionDrum": ((0.95, 0.72, 0.05, 1), 0.5, 0),
     "Metal": ((0.5, 0.52, 0.55, 1), 0.4, 0),
-    "LampLight": ((1.0, 0.85, 0.6, 1), 0.3, 8.0),
-    "TunnelLight": ((1.0, 0.8, 0.5, 1), 0.3, 6.0),
+    "LampLight": ((1.0, 0.95, 0.85, 1), 0.3, 8.0),
+    "TunnelLight": ((1.0, 0.97, 0.9, 1), 0.3, 6.0),
     "SignGreen": ((0.0, 0.33, 0.18, 1), 0.5, 0),
     "SignText": ((0.95, 0.95, 0.95, 1), 0.5, 0),
     "SignRed": ((0.75, 0.05, 0.05, 1), 0.5, 0),
@@ -32,6 +50,19 @@ def reset():
     scene.unit_settings.scale_length = 1.0
 
 
+def _image(name):
+    img = bpy.data.images.get(name)
+    if img:
+        return img
+    fn = TILES[name][0]
+    px = fn()
+    h, w = px.shape[:2]
+    img = bpy.data.images.new(name, w, h, alpha=True)
+    img.pixels.foreach_set(px.ravel())
+    img.pack()
+    return img
+
+
 def material(name):
     mat = bpy.data.materials.get(name)
     if mat:
@@ -40,12 +71,26 @@ def material(name):
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     mat.diffuse_color = color
-    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    nodes = mat.node_tree.nodes
+    bsdf = nodes.get("Principled BSDF")
     bsdf.inputs["Base Color"].default_value = color
     bsdf.inputs["Roughness"].default_value = rough
+    if name in TILES:
+        tex = nodes.new("ShaderNodeTexImage")
+        tex.image = _image(name)
+        tex.location = (-400, 200)
+        mat.node_tree.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
     if emit:
         bsdf.inputs["Emission Color"].default_value = color
         bsdf.inputs["Emission Strength"].default_value = emit
+    if color[3] < 1:
+        bsdf.inputs["Alpha"].default_value = color[3]
+        for attr, val in (("surface_render_method", "BLENDED"), ("blend_method", "BLEND")):
+            if hasattr(mat, attr):
+                try:
+                    setattr(mat, attr, val)
+                except TypeError:
+                    pass
     return mat
 
 
@@ -64,6 +109,8 @@ def add_object(coll_name, obj_name, mesh, mat_name):
     me = bpy.data.meshes.new(obj_name)
     me.from_pydata(verts.tolist(), [], faces)
     if np.any(uv):
+        if mat_name in TILES:
+            uv = uv / np.array(TILES[mat_name][1:3])
         layer = me.uv_layers.new(name="UVMap")
         loop_v = np.zeros(len(me.loops), int)
         me.loops.foreach_get("vertex_index", loop_v)

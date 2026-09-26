@@ -70,3 +70,41 @@ RAMP_LANES = 1
 # 地形メッシュ
 TERRAIN_STEP = 10.0
 TERRAIN_MARGIN = 300.0
+
+# ---- 見た目の種類分け ----------------------------------------------------
+
+# 遮音壁（沿道側の壁高欄の上）: 下が金属の吸音板、上が透明板
+SOUND_PANEL_HEIGHT = 1.5
+SOUND_CLEAR_HEIGHT = 1.2
+SOUND_POST_SPACING = 2.0
+
+# 防護柵（川の上の区間など）: 壁高欄の上の金属パイプ
+RAIL_HEIGHTS = (0.30, 0.60)
+RAIL_POST_SPACING = 2.0
+
+# 川の上を通る区間の概略線（緯度, 経度）。OSM の川データ（data/osm_water.json）が無い時に使う
+RAIL_ZONES = [
+    [(35.6840, 139.7740), (35.6870, 139.7705), (35.6905, 139.7640), (35.6915, 139.7600)],  # 日本橋川
+    [(35.6530, 139.7500), (35.6548, 139.7440), (35.6553, 139.7400), (35.6553, 139.7367)],  # 古川
+]
+RAIL_ZONE_RADIUS = 120.0
+WATER_BUFFER = 30.0
+
+# トンネル内
+WALKWAY_WIDTH = 0.75       # 点検用通路
+WALKWAY_HEIGHT = 0.25
+TILE_TOP = 3.0             # 白いタイルパネルの上端（路面から）
+TILE_DIRTY_TOP = 1.0       # この高さまでは汚れたタイル
+EQUIP_SPACING = 50.0       # 非常用設備（非常電話・消火栓）の箱
+GUIDE_LIGHT_SPACING = 50.0 # 避難誘導灯
+JETFAN_SPACING = 200.0
+TUNNEL_LIGHT_LEN = 1.5
+
+# 路面
+SHARP_CURVE_RADIUS = 120.0   # これより急なカーブは赤いカラー舗装・矢羽根・車線変更禁止
+YELLOW_NEAR_JUNCTION = 150.0 # 分岐・合流の前後これだけは車線変更禁止
+DOT_ZONE = 80.0              # 急カーブの手前の減速ドットの区間
+JOINT_SPACING = 40.0         # 高架の伸縮継手
+DELINEATOR_SPACING = 10.0    # 壁高欄の上の視線誘導標
+CHEVRON_SPACING = 16.0
+GORE_ZEBRA_SPACING = 3.0

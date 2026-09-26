@@ -68,8 +68,11 @@ def seg(mask, closed):
     return (mask & nxt) if closed else (mask[:-1] & nxt)
 
 
-def sweep(mesh, route, lat, dz, segmask, zoff=None, uv=False):
-    """断面（N×K の lat, dz）を中心線に沿って押し出す。"""
+def sweep(mesh, route, lat, dz, segmask, zoff=None):
+    """断面（N×K の lat, dz）を中心線に沿って押し出す。
+
+    UV は u = 道路に沿った距離、v = 断面に沿った距離（どちらもメートル）。
+    """
     lat = np.broadcast_to(np.asarray(lat, float), (len(route.s), np.shape(lat)[-1]))
     dz = np.broadcast_to(np.asarray(dz, float), lat.shape)
     K = lat.shape[1]
@@ -82,10 +85,10 @@ def sweep(mesh, route, lat, dz, segmask, zoff=None, uv=False):
         idx = np.arange(R * K).reshape(R, K)
         a, b, c, d = idx[:-1, :-1], idx[1:, :-1], idx[1:, 1:], idx[:-1, 1:]
         faces = np.stack([a, b, c, d], -1).reshape(-1, 4).tolist()
-        uvs = None
-        if uv:
-            v = np.arange(R) * route.step + route.s[rows[0]]
-            uvs = np.stack([lat[rows], np.broadcast_to(v[:, None], (R, K))], -1)
+        u = np.arange(R) * route.step + route.s[rows[0]]
+        prof = np.stack([lat[rows], dz[rows]], -1)
+        v = np.concatenate([np.zeros((R, 1)), np.cumsum(np.linalg.norm(np.diff(prof, axis=1), axis=-1), 1)], 1)
+        uvs = np.stack([np.broadcast_to(u[:, None], (R, K)), v], -1)
         mesh.add(verts, faces, uvs)
 
 
@@ -107,6 +110,47 @@ def box(mesh, center_xy, fwd, half_l, half_w, zb, zt):
     verts = [(*p, zb) for p in corners] + [(*p, zt) for p in corners]
     faces = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]]
     mesh.add(verts, faces)
+
+
+def cylinder(mesh, center_xy, fwd, radius, half_len, zc, seg_n=16):
+    """道路に沿った向きの横向き円柱（ジェットファンなど）。"""
+    f = np.append(np.asarray(fwd, float) / np.linalg.norm(fwd), 0.0)
+    l = np.array([-f[1], f[0], 0.0])
+    up = np.array([0.0, 0.0, 1.0])
+    c = np.append(np.asarray(center_xy, float), zc)
+    a = np.linspace(0, 2 * np.pi, seg_n, endpoint=False)
+    ring = radius * (np.cos(a)[:, None] * l + np.sin(a)[:, None] * up)
+    verts = np.vstack([c - f * half_len + ring, c + f * half_len + ring])
+    faces = [[i, (i + 1) % seg_n, seg_n + (i + 1) % seg_n, seg_n + i] for i in range(seg_n)]
+    faces += [list(range(seg_n))[::-1], list(range(seg_n, 2 * seg_n))]
+    mesh.add(verts, faces)
+
+
+def vcylinder(mesh, center_xy, radius, zb, zt, seg_n=16):
+    """縦向きの円柱。UV は u = 周方向（1周 = 3m 相当）、v = 高さ。"""
+    a = np.linspace(0, 2 * np.pi, seg_n + 1)
+    c = np.asarray(center_xy, float)
+    ring = c + radius * np.column_stack([np.cos(a), np.sin(a)])
+    verts = np.vstack([np.column_stack([ring, np.full(seg_n + 1, zb)]),
+                       np.column_stack([ring, np.full(seg_n + 1, zt)])])
+    u = a / (2 * np.pi) * 3.0
+    uv = np.vstack([np.column_stack([u, np.zeros_like(u)]), np.column_stack([u, np.full_like(u, zt - zb)])])
+    m = seg_n + 1
+    faces = [[i, i + 1, m + i + 1, m + i] for i in range(seg_n)]
+    faces += [list(range(m, 2 * m - 1))]
+    mesh.add(verts, faces, uv)
+
+
+def plate(mesh, center, facing, half_w, half_h, flip=False):
+    """facing の向きを向いた縦の板。UV は 0〜1（flip で左右反転）。"""
+    f = np.asarray(facing, float)
+    f = f / np.linalg.norm(f)
+    u = np.array([-f[1], f[0], 0.0])  # 正面から見て右
+    w = np.array([0.0, 0.0, 1.0])
+    c = np.asarray(center, float)
+    verts = [c - u * half_w - w * half_h, c + u * half_w - w * half_h, c + u * half_w + w * half_h, c - u * half_w + w * half_h]
+    uv = [[1, 0], [0, 0], [0, 1], [1, 1]] if flip else [[0, 0], [1, 0], [1, 1], [0, 1]]
+    mesh.add(verts, [[0, 1, 2, 3]], uv)
 
 
 def disk(mesh, center, facing, radius, seg_n=24):
@@ -139,7 +183,7 @@ def half_width(route):
 
 def deck(mesh, route, segmask, zoff=None):
     h = half_width(route)[:, None]
-    sweep(mesh, route, np.hstack([-h, h]), 0.0, segmask, zoff=zoff, uv=True)
+    sweep(mesh, route, np.hstack([-h, h]), 0.0, segmask, zoff=zoff)
 
 
 def barrier(mesh, route, side, segmask, zoff=None):
@@ -157,10 +201,29 @@ def deck_body(mesh, route, segmask, zoff=None):
     sweep(mesh, route, np.hstack([o, o, -o, -o]), np.array([0.0, -T, -T, 0.0]), segmask, zoff=zoff)
 
 
-def tunnel_shell(mesh, route, segmask):
-    o = (half_width(route) + C.BARRIER_BASE + 0.3)[:, None]
-    H = C.TUNNEL_HEIGHT
-    sweep(mesh, route, np.hstack([o, o, -o, -o]), np.array([0.0, H, H, 0.0]), segmask)
+def tunnel_offset(route):
+    return half_width(route) + C.WALKWAY_WIDTH
+
+
+def tunnel_shell(tile, dirty, upper, route, segmask):
+    """トンネルの壁（下は白いタイルパネル、下端付近は汚れたタイル）と、上の壁・天井。"""
+    o = tunnel_offset(route)[:, None]
+    H, W0, D, T = C.TUNNEL_HEIGHT, C.WALKWAY_HEIGHT, C.TILE_DIRTY_TOP, C.TILE_TOP
+    for side in (1, -1):
+        for mesh, lo, hi in ((dirty, W0, D), (tile, D, T)):
+            # 壁の面が道路側を向くよう、左は下から上、右は上から下の順に並べる
+            lat, dz = _side_profile(side, np.hstack([o, o]), np.broadcast_to([lo, hi], (len(o), 2)))
+            sweep(mesh, route, lat, dz, segmask)
+    sweep(upper, route, np.hstack([o, o, -o, -o]), np.array([T, H, H, T]), segmask)
+
+
+def walkway(mesh, route, side, segmask):
+    """トンネル内の点検用通路（縁石の高さの歩道）。"""
+    e = half_width(route)[:, None]
+    lat = np.hstack([e, e, e + C.WALKWAY_WIDTH])
+    dz = np.broadcast_to([0.0, C.WALKWAY_HEIGHT, C.WALKWAY_HEIGHT], lat.shape)
+    lat, dz = _side_profile(side, lat, dz)
+    sweep(mesh, route, lat, dz, segmask)
 
 
 def portals(mesh, route, mask):
@@ -170,7 +233,7 @@ def portals(mesh, route, mask):
     nxt = np.roll(m, -1) if route.closed else np.concatenate([m[1:], [False]])
     ends = np.flatnonzero((m & ~prev) | (m & ~nxt))
     for i in ends:
-        o = half_width(route)[i] + C.BARRIER_BASE + 0.3
+        o = tunnel_offset(route)[i]
         zb = route.z[i] + C.TUNNEL_HEIGHT
         zt = max(route.ground[i] + 0.5, zb + 1.0)
         box(mesh, route.P[i], route.T[i], 0.4, o + 0.6, zb, zt)
@@ -187,24 +250,51 @@ def retaining_wall(mesh, route, side, segmask):
     sweep(mesh, route, lat, dz, segmask)
 
 
-def markings(mesh, route, segmask, zoff=None):
-    """車道外側線（実線）と車線境界線（破線 8m/12m）。"""
+def markings(white, yellow, route, segmask, zoff=None, no_change=None):
+    """車道外側線（実線）と車線境界線（破線 8m/12m、車線変更禁止の所は黄色の実線）。"""
     h = half_width(route)
     lift = C.MARK_LIFT
     w = C.MARK_WIDTH
 
-    def line(y, width, mask):
+    def line(mesh, y, width, mask):
         sweep(mesh, route, np.stack([y - width / 2, y + width / 2], 1), lift, mask & segmask, zoff=zoff)
 
     all_seg = np.ones(len(segmask), bool)
-    line(h - C.SHOULDER_LEFT, 0.20, all_seg)
-    line(-h + C.SHOULDER_RIGHT, w, all_seg)
+    line(white, h - C.SHOULDER_LEFT, 0.20, all_seg)
+    line(white, -h + C.SHOULDER_RIGHT, w, all_seg)
     phase = np.mod(route.s, C.DASH_LEN + C.DASH_GAP) < C.DASH_LEN
     dash = phase if route.closed else phase[:-1]
+    ban = seg(no_change, route.closed) if no_change is not None else np.zeros(len(segmask), bool)
     for k in range(1, int(route.lanes.max())):
         has = seg(route.lanes > k, route.closed)
         y = h - C.SHOULDER_LEFT - k * C.LANE_WIDTH
-        line(y, w, has & dash)
+        line(white, y, w, has & dash & ~ban)
+        line(yellow, y, w, has & ban)
+
+
+def color_pavement(mesh, route, mask):
+    """急カーブの赤いカラー舗装（車線の部分だけ）。"""
+    h = half_width(route)[:, None]
+    lat = np.hstack([-h + C.SHOULDER_RIGHT + 0.1, h - C.SHOULDER_LEFT - 0.1])
+    sweep(mesh, route, lat, C.MARK_LIFT / 2, seg(mask, route.closed))
+
+
+def slow_dots(mesh, route, progress):
+    """急カーブ手前の減速ドット。車線の両端に白い四角が並び、カーブに近いほど内側へ寄る。
+
+    progress は減速区間の中での進み具合（0〜1、区間外は NaN）。
+    """
+    h = half_width(route)
+    every = max(1, int(round(4.0 / route.step)))
+    for i in range(0, len(route.s), every):
+        k = progress[i]
+        if np.isnan(k):
+            continue
+        for j in range(int(route.lanes[i])):
+            left = h[i] - C.SHOULDER_LEFT - j * C.LANE_WIDTH
+            for y in (left - 0.25 - 0.45 * k, left - C.LANE_WIDTH + 0.25 + 0.45 * k):
+                box(mesh, route.P[i] + route.N[i] * y, route.T[i], 0.15, 0.15,
+                    route.z[i], route.z[i] + C.MARK_LIFT * 1.5)
 
 
 def lane_centers(route):
@@ -243,14 +333,39 @@ def piers(mesh, route, blocked=None):
 
 
 def tunnel_lights(mesh, route):
-    every = max(1, int(round(C.TUNNEL_LIGHT_SPACING / route.step)))
-    h = half_width(route)
+    """トンネル照明（壁の上の方に、ほぼ連続して並ぶ灯具）。"""
+    every = max(1, int(round((C.TUNNEL_LIGHT_LEN + 0.5) / route.step)))
+    o = tunnel_offset(route)
     for i in range(0, len(route.s), every):
         if not route.tunnel[i]:
             continue
-        for o in (h[i] / 2, -h[i] / 2):
-            box(mesh, route.P[i] + route.N[i] * o, route.T[i], 0.6, 0.15,
-                route.z[i] + C.TUNNEL_HEIGHT - 0.15, route.z[i] + C.TUNNEL_HEIGHT - 0.02)
+        for side in (1, -1):
+            box(mesh, route.P[i] + route.N[i] * side * (o[i] - 0.2), route.T[i], C.TUNNEL_LIGHT_LEN / 2, 0.15,
+                route.z[i] + C.TUNNEL_HEIGHT - 0.9, route.z[i] + C.TUNNEL_HEIGHT - 0.7)
+
+
+def tunnel_equipment(boxes, red, green, fans, route):
+    """非常用設備の箱（非常電話・消火栓）、避難誘導灯、ジェットファン。"""
+    o = tunnel_offset(route)
+    n = len(route.s)
+    every = max(1, int(round(C.EQUIP_SPACING / route.step)))
+    for i in range(0, n, every):
+        if not route.tunnel[i]:
+            continue
+        p, nn, t, z = route.P[i], route.N[i], route.T[i], route.z[i]
+        box(boxes, p + nn * (o[i] - 0.12), t, 0.45, 0.12, z + 0.5, z + 1.9)
+        box(red, p + nn * (o[i] - 0.25), t, 0.12, 0.02, z + 2.0, z + 2.2)
+        j = (i + every // 2) % n
+        if route.tunnel[j]:
+            for side in (1, -1):
+                box(green, route.P[j] + route.N[j] * side * (o[j] - 0.03), route.T[j], 0.25, 0.03,
+                    route.z[j] + 0.9, route.z[j] + 1.1)
+    every = max(1, int(round(C.JETFAN_SPACING / route.step)))
+    for i in range(every // 2, n, every):
+        if not route.tunnel[i]:
+            continue
+        for y in (-1.6, 1.6):
+            cylinder(fans, route.P[i] + route.N[i] * y, route.T[i], 0.55, 2.0, route.z[i] + C.TUNNEL_HEIGHT - 0.8)
 
 
 def light_poles(poles, lamps, route, skip=None, blocked=None):
@@ -318,3 +433,98 @@ def warning_sign(posts, yellow, texts, route, i, side, text):
     diamond(yellow, c, -t, 0.45)
     texts.append({"text": text, "pos": c - np.append(t, 0) * 0.01, "facing": -t, "size": 0.2,
                   "material": "WarnText", "max_width": 0.5})
+
+
+# ---- 壁高欄の上の設備 -----------------------------------------------------
+
+def sound_wall(panels, clear, posts, route, segmask, side=1):
+    """遮音壁。壁高欄の上に H形鋼の支柱を立て、下は金属の吸音板、上は透明板。"""
+    e = (half_width(route) + C.BARRIER_BASE - 0.12)[:, None]
+    z0 = C.BARRIER_HEIGHT
+    z1 = z0 + C.SOUND_PANEL_HEIGHT
+    z2 = z1 + C.SOUND_CLEAR_HEIGHT
+    for mesh, lo, hi in ((panels, z0, z1), (clear, z1, z2)):
+        lat, dz = _side_profile(side, np.hstack([e, e]), np.broadcast_to([lo, hi], (len(e), 2)))
+        sweep(mesh, route, lat, dz, segmask)
+    m = np.asarray(segmask, bool)
+    every = max(1, int(round(C.SOUND_POST_SPACING / route.step)))
+    for i in range(0, len(m), every):
+        if not m[i]:
+            continue
+        o = side * (e[i, 0] + 0.05)
+        box(posts, route.P[i] + route.N[i] * o, route.T[i], 0.1, 0.1, route.z[i] + z0, route.z[i] + z2 + 0.1)
+    # 上端の笠木
+    lat, dz = _side_profile(side, np.hstack([e - 0.1, e + 0.15]), np.broadcast_to([z2 + 0.1, z2 + 0.1], (len(e), 2)))
+    sweep(posts, route, lat, dz, segmask)
+
+
+def rail_fence(mesh, route, segmask, side=1):
+    """壁高欄の上の金属パイプの防護柵（支柱＋横桟2本）。"""
+    e = half_width(route) + C.BARRIER_BASE - 0.15
+    H = C.BARRIER_HEIGHT
+    for hgt in C.RAIL_HEIGHTS:
+        lat = side * np.stack([e - 0.04, e + 0.04, e + 0.04, e - 0.04], 1)
+        dz = np.broadcast_to([H + hgt - 0.04, H + hgt - 0.04, H + hgt + 0.04, H + hgt + 0.04], lat.shape)
+        sweep(mesh, route, np.hstack([lat, lat[:, :1]]), np.hstack([dz, dz[:, :1]]), segmask)
+    m = np.asarray(segmask, bool)
+    every = max(1, int(round(C.RAIL_POST_SPACING / route.step)))
+    for i in range(0, len(m), every):
+        if m[i]:
+            box(mesh, route.P[i] + route.N[i] * side * e[i], route.T[i], 0.05, 0.05,
+                route.z[i] + H, route.z[i] + H + max(C.RAIL_HEIGHTS) + 0.05)
+
+
+def delineators(white, orange, route, mask_left, mask_right):
+    """壁高欄の上の視線誘導標（左は白、右は橙）。"""
+    every = max(1, int(round(C.DELINEATOR_SPACING / route.step)))
+    h = half_width(route)
+    for i in range(0, len(route.s), every):
+        for side, mesh, m in ((1, white, mask_left), (-1, orange, mask_right)):
+            if not m[i]:
+                continue
+            y = side * (h[i] + 0.05)
+            box(mesh, route.P[i] + route.N[i] * y, route.T[i], 0.03, 0.05,
+                route.z[i] + C.BARRIER_HEIGHT - 0.25, route.z[i] + C.BARRIER_HEIGHT - 0.12)
+
+
+def chevrons(mesh, route, curv, mask):
+    """急カーブの外側に並べる矢羽根板（カーブの向きを指す）。"""
+    every = max(1, int(round(C.CHEVRON_SPACING / route.step)))
+    h = half_width(route)
+    for i in range(0, len(route.s), every):
+        if not mask[i]:
+            continue
+        side = -1 if curv[i] > 0 else 1  # 左カーブなら外側は右
+        y = side * (h[i] + 0.02)
+        c = np.append(route.P[i] + route.N[i] * y, route.z[i] + C.BARRIER_HEIGHT + 0.45)
+        # 矢印はカーブの向き（左カーブなら左向き）
+        plate(mesh, c, -route.T[i], 0.30, 0.45, flip=curv[i] > 0)
+
+
+def joints(mesh, route, mask):
+    """高架の伸縮継手（路面を横切る鋼製の帯）。"""
+    every = max(1, int(round(C.JOINT_SPACING / route.step)))
+    h = half_width(route)
+    for i in range(every // 2, len(route.s), every):
+        if mask[i]:
+            box(mesh, route.P[i], route.T[i], 0.12, h[i], route.z[i] - 0.01, route.z[i] + C.MARK_LIFT * 0.8)
+
+
+def cushion_drums(mesh, center_xy, fwd, z, count=3):
+    """分岐の先端に置く衝撃緩和用のクッションドラム（黄と黒）。"""
+    f = np.asarray(fwd, float) / np.linalg.norm(fwd)
+    l = np.array([-f[1], f[0]])
+    for k in range(count):
+        for j in range(-(k // 2), k // 2 + 1):
+            vcylinder(mesh, center_xy - f * (1.0 * k) + l * (0.95 * j), 0.45, z, z + 0.95)
+
+
+def gore_zebra(mesh, pts_a, pts_b, z):
+    """分岐部の導流帯。2本の境界線の間を斜めの白線で埋める。"""
+    for a, b in zip(pts_a, pts_b):
+        d = b - a
+        L = np.linalg.norm(d)
+        if L < 0.6:
+            continue
+        mid = (a + b) / 2
+        box(mesh, mid, d, L / 2, 0.22, z, z + C.MARK_LIFT)

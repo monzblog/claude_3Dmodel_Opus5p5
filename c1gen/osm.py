@@ -15,18 +15,23 @@ C1_REF = re.compile(r"(^|;)\s*C1\s*(;|$)")
 C1_NAME = "都心環状線"
 
 
-def fetch(path, bbox=config.BBOX):
+def _query(path, body, bbox):
     s, w, n, e = bbox
-    query = f"""
-    [out:json][timeout:180];
-    way["highway"~"^(motorway|motorway_link)$"]({s},{w},{n},{e});
-    out body geom;
-    """
+    query = f"[out:json][timeout:180];\n{body.format(bbox=f'{s},{w},{n},{e}')}\nout body geom;"
     r = requests.post(OVERPASS_URL, data={"data": query},
                       headers={"User-Agent": config.USER_AGENT}, timeout=240)
     r.raise_for_status()
     with open(path, "w") as f:
         f.write(r.text)
+
+
+def fetch(path, bbox=config.BBOX):
+    _query(path, 'way["highway"~"^(motorway|motorway_link)$"]({bbox});', bbox)
+
+
+def fetch_water(path, bbox=config.BBOX):
+    """川の中心線（高架が川の上を通る区間の壁の種類を決めるのに使う）。"""
+    _query(path, 'way["waterway"~"^(river|canal)$"]({bbox});', bbox)
 
 
 def _is_c1(tags):
