@@ -22,7 +22,8 @@ def fetch(path, bbox=config.BBOX):
     way["highway"~"^(motorway|motorway_link)$"]({s},{w},{n},{e});
     out body geom;
     """
-    r = requests.post(OVERPASS_URL, data={"data": query}, timeout=240)
+    r = requests.post(OVERPASS_URL, data={"data": query},
+                      headers={"User-Agent": config.USER_AGENT}, timeout=240)
     r.raise_for_status()
     with open(path, "w") as f:
         f.write(r.text)

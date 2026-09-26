@@ -38,7 +38,8 @@ def fetch(root, bbox=config.BBOX):
                 path = _tile_path(root, name, z, x, y)
                 if os.path.exists(path):
                     continue
-                r = requests.get(URL.format(name=name, z=z, x=x, y=y), timeout=60)
+                r = requests.get(URL.format(name=name, z=z, x=x, y=y),
+                                 headers={"User-Agent": config.USER_AGENT}, timeout=60)
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, "w") as f:
                     # 404 はその範囲にデータが無いという意味なので空ファイルで記録

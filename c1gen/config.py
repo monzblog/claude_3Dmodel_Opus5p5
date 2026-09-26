@@ -1,9 +1,12 @@
 """首都高C1モデルの寸法・生成パラメータ。単位はすべてメートル。"""
 
 # 取得範囲（C1全周を含む矩形: 南, 西, 北, 東）
-BBOX = (35.664, 139.738, 35.700, 139.785)
+BBOX = (35.645, 139.728, 35.700, 139.790)
 
 # 平面直角座標系 IX系（東京）。Blender座標の原点はこの点
+# Overpass は既定の python-requests の User-Agent を 406 で拒否するため名乗る
+USER_AGENT = "c1gen/0.1 (+https://github.com/monzblog/claude_3Dmodel_Opus5p5)"
+
 CRS = "EPSG:6677"
 ORIGIN_LATLON = (35.6812, 139.7600)
 
