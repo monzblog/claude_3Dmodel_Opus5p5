@@ -41,6 +41,7 @@ TUNNEL_DEPTH = 12.0
 CUTTING_DEPTH = 7.0
 PROFILE_SIGMA = 45.0       # 縦断を滑らかにするガウス幅
 MAX_GRADE = 0.07
+TWIN_DZ = 5.5              # 上下線の高さの差がこれ未満なら、同じ高さに並ぶものとして間隔を確保する
 
 # トンネル
 TUNNEL_HEIGHT = 6.0

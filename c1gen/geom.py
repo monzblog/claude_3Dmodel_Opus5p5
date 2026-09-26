@@ -222,7 +222,8 @@ def lane_centers(route):
 
 # ---- 高架・トンネル付帯物 --------------------------------------------------
 
-def piers(mesh, route):
+def piers(mesh, route, blocked=None):
+    """blocked(route, xy, z_lo, z_hi) が True の位置（下を別の路面が通る所）には柱を立てない。"""
     every = max(1, int(round(C.PIER_SPACING / route.step)))
     h = half_width(route)
     for i in range(0, len(route.s), every):
@@ -235,6 +236,8 @@ def piers(mesh, route):
             continue
         offs = [0.0] if h[i] < 6.0 else [-h[i] / 2, h[i] / 2]
         for o in offs:
+            if blocked is not None and blocked(route, route.P[i] + route.N[i] * o, -np.inf, col_top):
+                continue
             box(mesh, route.P[i] + route.N[i] * o, route.T[i], C.PIER_SIZE / 2, C.PIER_SIZE / 2,
                 route.ground[i] - 0.5, col_top)
 
@@ -250,8 +253,8 @@ def tunnel_lights(mesh, route):
                 route.z[i] + C.TUNNEL_HEIGHT - 0.15, route.z[i] + C.TUNNEL_HEIGHT - 0.02)
 
 
-def light_poles(poles, lamps, route, skip=None):
-    """左の壁高欄の上に立つ照明柱。skip[i] が True の所には立てない。"""
+def light_poles(poles, lamps, route, skip=None, blocked=None):
+    """左の壁高欄の上に立つ照明柱。skip[i] が True の所と、真上を別の路面が通る所には立てない。"""
     every = max(1, int(round(C.LIGHT_SPACING / route.step)))
     h = half_width(route)
     for i in range(0, len(route.s), every):
@@ -261,6 +264,8 @@ def light_poles(poles, lamps, route, skip=None):
         base = route.z[i] + C.BARRIER_HEIGHT
         top = base + C.LIGHT_POLE_HEIGHT
         p, n, t = route.P[i], route.N[i], route.T[i]
+        if blocked is not None and blocked(route, p + n * (e - C.LIGHT_ARM / 2), base, top + C.DECK_THICKNESS + 0.5):
+            continue
         box(poles, p + n * e, t, 0.1, 0.1, base, top)
         box(poles, p + n * (e - C.LIGHT_ARM / 2), t, 0.08, C.LIGHT_ARM / 2, top - 0.15, top)
         box(lamps, p + n * (e - C.LIGHT_ARM), t, 0.35, 0.18, top - 0.3, top - 0.15)

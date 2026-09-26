@@ -18,7 +18,7 @@ from . import dem as dem_mod
 from . import geom as G
 from . import osm
 from .proj import to_latlon
-from .route import Route, loop_profile, ramp_profile
+from .route import Route, _gauss, loop_profile, ramp_profile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
@@ -67,6 +67,7 @@ def make_routes(loops_raw, ramps_raw, dem):
         r = Route(lp["name"], lp["pts"], lp["attrs"], closed=True)
         loop_profile(r, dem)
         loops.append(r)
+    _separate_twins(loops)
     ramps = []
     counts = {}
     for rr in ramps_raw:
@@ -78,7 +79,10 @@ def make_routes(loops_raw, ramps_raw, dem):
         r = Route(f"{main.name}_{rr['kind']}_{counts[key]:02d}", rr["pts"], rr["attrs"], closed=False)
         if r.length < 10:
             continue
-        j = int(np.argmin(np.linalg.norm(main.P - r.P[0], axis=1)))
+        j = int(np.argmin(np.linalg.norm(main.P - main.shift - r.P[0], axis=1)))
+        # 本線を押し広げた分だけ、分岐点の近くのランプも一緒に動かす
+        fade = np.clip(1 - r.s / 60.0, 0, 1)[:, None]
+        r.move(r.P + main.shift[j] * fade)
         ramp_profile(r, dem, main.z[j])
         k = min(len(r.P) - 1, int(60 / r.step))
         r.kind = rr["kind"]
@@ -87,13 +91,87 @@ def make_routes(loops_raw, ramps_raw, dem):
         r.side = 1 if np.dot(r.P[k] - main.P[j], main.N[j]) >= 0 else -1
         r.destination = rr["destination"]
         ramps.append(r)
-    return loops, ramps
+    return loops, _dedupe_ramps(ramps)
+
+
+def _separate_twins(loops, iters=3):
+    """内回り・外回りの中心線が近すぎて壁高欄が重なる所を、左右へ滑らかに押し広げる。
+
+    OSM の上下線は実際より近く描かれていることがあり、そのままだと相手の壁高欄が車線に入る。
+    """
+    orig = [r.P.copy() for r in loops]
+    for r in loops:
+        r.shift = np.zeros_like(r.P)
+    if len(loops) != 2:
+        return
+    for _ in range(iters):
+        shifts = []
+        for a, b in (loops, loops[::-1]):
+            d, k = cKDTree(b.P).query(a.P)
+            need = G.half_width(a) + G.half_width(b)[k] + 2 * C.BARRIER_BASE + 0.1
+            short = np.where((d < need) & (np.abs(a.z - b.z[k]) < C.TWIN_DZ), need - d, 0.0)
+            away = (a.P - b.P[k]) / np.maximum(d, 1e-6)[:, None]
+            shifts.append(away * (short / 2)[:, None])
+        if not any(np.abs(v).max() > 0.02 for v in shifts):
+            break
+        for r, v in zip(loops, shifts):
+            # ずらし量を滑らかにしてから足す（最大値を保つため少し多めに）
+            sm = _gauss(v, 15.0 / r.step, True)
+            gain = np.linalg.norm(v, axis=1).max() / max(np.linalg.norm(sm, axis=1).max(), 1e-6)
+            r.move(r.P + sm * min(gain, 3.0))
+    for r, p in zip(loops, orig):
+        r.shift = r.P - p
+
+
+def _dedupe_ramps(ramps, tol=1.5):
+    """同じ区間を二重に作っているランプ（並行する本線の別れ道を分岐・合流の両方から辿った時など）を除く。
+
+    先に登録したランプと重なる点が半分以上なら捨て、途中から重なるなら重なる手前で切る。
+    """
+    kept = []
+    for q in ramps:
+        dup = np.zeros(len(q.P), bool)
+        for o in kept:
+            d, k = cKDTree(o.P).query(q.P)
+            dup |= (d < tol) & (np.abs(q.z - o.z[k]) < 1.0)
+        if dup.mean() > 0.5:
+            continue
+        if dup.any():
+            end = int(np.argmax(dup))
+            if q.s[end] < 30:
+                continue
+            q.truncate(end + 1)
+        kept.append(q)
+    return kept
+
+
+def _blocker(routes):
+    """橋脚・照明柱・標識が、別の路面（壁高欄を含む）を突き抜けないかを調べる関数を返す。"""
+    P = np.vstack([r.P for r in routes])
+    z = np.concatenate([r.z for r in routes])
+    half = np.concatenate([G.half_width(r) + C.BARRIER_BASE for r in routes])
+    owner = np.concatenate([np.full(len(r.P), k) for k, r in enumerate(routes)])
+    ids = {id(r): k for k, r in enumerate(routes)}
+    tree = cKDTree(P)
+    reach = float(half.max() + C.PIER_SIZE)
+
+    def blocked(route, xy, lo, hi):
+        """xy の位置で、高さ lo〜hi の間を別の路面が通っていれば True。"""
+        near = np.asarray(tree.query_ball_point(xy, reach), int)
+        if not len(near):
+            return False
+        d = np.linalg.norm(P[near] - xy, axis=1)
+        hit = (owner[near] != ids[id(route)]) & (d < half[near] + C.PIER_SIZE / 2 + 0.3) & (z[near] > lo) & (z[near] < hi)
+        return bool(hit.any())
+
+    return blocked
 
 
 def build_scene(loops, ramps):
     layers = {}
     texts = []
     main_poly = {id(r): _deck_polygon(r) for r in loops}
+    blocked = _blocker(loops + ramps)
 
     for r in loops:
         L = layers.setdefault(f"C1_{r.name}", Layer())
@@ -112,13 +190,13 @@ def build_scene(loops, ramps):
                              G.seg(r.cutting & ~gap, True))
         G.deck_body(L.mesh(f"C1_{r.name}_Viaduct", "StructureConcrete"), r,
                     G.seg(r.z - r.ground > 1.5, True))
-        G.piers(L.mesh(f"C1_{r.name}_Piers", "StructureConcrete"), r)
+        G.piers(L.mesh(f"C1_{r.name}_Piers", "StructureConcrete"), r, blocked)
         G.tunnel_shell(L.mesh(f"C1_{r.name}_Tunnel", "TunnelWall"), r, G.seg(r.tunnel, True))
         G.portals(L.mesh(f"C1_{r.name}_Tunnel_Portals", "StructureConcrete"), r, r.tunnel)
         G.tunnel_lights(L.mesh(f"C1_{r.name}_TunnelLights", "TunnelLight"), r)
         G.light_poles(L.mesh(f"C1_{r.name}_LightPoles", "Metal"), L.mesh(f"C1_{r.name}_Lamps", "LampLight"),
-                      r, skip=removed[1])
-        _signs(L, texts, r, mine)
+                      r, skip=removed[1], blocked=blocked)
+        _signs(L, texts, r, mine, blocked)
 
     R = layers.setdefault("C1_Ramps", Layer())
     for q in ramps:
@@ -135,14 +213,14 @@ def build_scene(loops, ramps):
             G.retaining_wall(R.mesh("C1_Ramps_RetainingWalls", "Concrete"), q, side, G.seg(q.cutting & ok, False))
         G.deck_body(R.mesh("C1_Ramps_Viaduct", "StructureConcrete"), q,
                     G.seg((q.z - q.ground > 1.5) & ~in_main, False), zoff=zoff)
-        G.piers(R.mesh("C1_Ramps_Piers", "StructureConcrete"), q)
+        G.piers(R.mesh("C1_Ramps_Piers", "StructureConcrete"), q, blocked)
         G.tunnel_shell(R.mesh("C1_Ramps_Tunnel", "TunnelWall"), q, G.seg(q.tunnel & ~in_main, False))
         G.portals(R.mesh("C1_Ramps_Tunnel_Portals", "StructureConcrete"), q, q.tunnel & ~in_main)
         G.tunnel_lights(R.mesh("C1_Ramps_TunnelLights", "TunnelLight"), q)
     return layers, texts
 
 
-def _signs(L, texts, r, ramps):
+def _signs(L, texts, r, ramps, blocked):
     frames = L.mesh(f"C1_{r.name}_SignFrames", "Metal")
     panels = L.mesh(f"C1_{r.name}_SignPanels", "SignGreen")
     n = len(r.s)
@@ -151,7 +229,8 @@ def _signs(L, texts, r, ramps):
         if q.kind == "diverge":
             for dist, extra in ((C.SIGN_ADVANCE, f"{int(C.SIGN_ADVANCE)}m"), (40.0, "出口" if q.side > 0 else "右 出口")):
                 i = (q.junction - int(dist / r.step)) % n
-                if not r.tunnel[i]:
+                over = blocked(r, r.P[i], r.z[i] + 0.5, r.z[i] + C.SIGN_CLEARANCE + 3.0 + C.DECK_THICKNESS)
+                if not r.tunnel[i] and not over:
                     G.gantry(frames, panels, texts, r, i, [dest, extra], q.side)
         else:
             i = (q.junction - int(120 / r.step)) % n

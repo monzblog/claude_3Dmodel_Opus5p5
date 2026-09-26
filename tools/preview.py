@@ -35,7 +35,11 @@ def main(blend, outdir, lanes_path=None):
     lanes_path = lanes_path or os.path.splitext(blend)[0] + "_lanes.json"
     with open(lanes_path) as f:
         routes = json.load(f)["routes"]
-    views = [("overview", (0, -4500, 5000), (0, 0, 0), 50)]
+    # 俯瞰は周回全体が入るよう、全ルートの範囲の中心を狙う
+    allp = np.array([p for r in routes for lane in r["lanes"] for p in lane if p])
+    c = (allp.min(0) + allp.max(0)) / 2
+    span = float((allp.max(0) - allp.min(0))[:2].max())
+    views = [("overview", (c[0], c[1] - span * 0.6, span * 2.0), (c[0], c[1], 0), 50)]
     for r in routes:
         lane = [p for p in r["lanes"][0] if p]
         n = len(lane)

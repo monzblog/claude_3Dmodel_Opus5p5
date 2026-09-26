@@ -65,6 +65,20 @@ class Route:
         self.width = _gauss(width, 20.0 / self.step, closed)
         self.lat, self.lon = to_latlon(self.P[:, 0], self.P[:, 1])
 
+    def move(self, P):
+        """中心線の位置だけを置き換える（高さ・属性はそのまま）。"""
+        self.P = np.asarray(P, float)
+        self._frames()
+        self.lat, self.lon = to_latlon(self.P[:, 0], self.P[:, 1])
+
+    def truncate(self, n):
+        """先頭から n 点だけ残す（開いたルート用）。"""
+        for k in ("s", "P", "lanes", "bridge", "tunnel_tag", "cutting_tag", "layer", "width", "lat", "lon",
+                  "T", "N", "ground", "z", "elevated", "tunnel", "cutting"):
+            if hasattr(self, k):
+                setattr(self, k, getattr(self, k)[:n])
+        self.length = float(self.s[-1])
+
     def _frames(self):
         P = self.P
         if self.closed:
