@@ -173,24 +173,62 @@ def terrain(routes, dem):
     grid = np.column_stack([X.ravel(), Y.ravel()])
     lat, lon = to_latlon(grid[:, 0], grid[:, 1])
     Z = dem.sample(lat, lon) - 0.05
-    cuts, pts, zs = [], [], []
+    step = C.TERRAIN_STEP
+    # 路面が地面近く・地下にある所は、ルートごとにその路面より下へ下げる。
+    # 一番近いルートの高さで決めると、掘割の本線の横を通る浅いランプの高さで本線が埋まる
+    opens = []
     for r in routes:
         low = (r.z < r.ground + 1.5) & ~r.tunnel
-        for rows in G.runs(G.seg(low, r.closed), r.closed):
-            # 格子1.5マス分広く下げ、斜めの面が路面に被らないようにする
-            cuts.append((r.P[rows], float(r.width.max() / 2 + C.BARRIER_BASE + 1.5 * C.TERRAIN_STEP)))
-        pts.append(r.P[low])
-        zs.append(r.z[low])
-    hole = _union_buffer(cuts)
-    if hole is not None:
+        if not low.any():
+            continue
+        half = float(r.width.max() / 2 + C.BARRIER_BASE)
+        runs = [r.P[rows] for rows in G.runs(G.seg(low, r.closed), r.closed)]
+        # 格子1.5マス分広く下げ、斜めの面が路面に被らないようにする
+        hole = _union_buffer([(p, half + 1.5 * step) for p in runs])
+        opens.append((runs, half + 0.5 * step))
+        if hole is None:
+            continue
         inside = _inside(hole, grid)
-        tree = cKDTree(np.vstack(pts))
-        _, k = tree.query(grid[inside])
-        Z[inside] = np.minimum(Z[inside], np.concatenate(zs)[k] - 1.0)
+        _, k = cKDTree(r.P[low]).query(grid[inside])
+        Z[inside] = np.minimum(Z[inside], r.z[low][k] - 1.0)
+    # トンネルの上は、10m格子の補間で地面が天井より下に来ないよう天井＋土かぶりまで上げる。
+    # ただし別の路面（掘割・地平）の真上は開けておく
+    keep_open = _union_buffer([(p, w) for runs, w in opens for p in runs])
+    for r in routes:
+        if not r.tunnel.any():
+            continue
+        half = float(r.width.max() / 2 + C.BARRIER_BASE)
+        cover = _union_buffer([(r.P[rows], half + 1.5 * step)
+                               for rows in G.runs(G.seg(r.tunnel, r.closed), r.closed)])
+        if cover is None:
+            continue
+        inside = _inside(cover, grid) & ~_inside(keep_open, grid)
+        _, k = cKDTree(r.P[r.tunnel]).query(grid[inside])
+        top = r.z[r.tunnel] + C.TUNNEL_HEIGHT + C.TUNNEL_COVER_MIN
+        Z[inside] = np.maximum(Z[inside], top[k])
     ny, nx = X.shape
     idx = np.arange(nx * ny).reshape(ny, nx)
     a, b, c, d = idx[:-1, :-1], idx[:-1, 1:], idx[1:, 1:], idx[1:, :-1]
-    faces = np.stack([a, b, c, d], -1).reshape(-1, 4).tolist()
+    faces = np.stack([a, b, c, d], -1).reshape(-1, 4)
+    # それでもトンネルの内側（路面〜天井の高さ）を横切る面は消す。
+    # 坑口のすぐ横で別のランプが地上に出る所などで起きる
+    fz = Z[faces]
+    center = grid[faces].mean(1)
+    drop = np.zeros(len(faces), bool)
+    for r in routes:
+        if not r.tunnel.any():
+            continue
+        o = float(r.width.max() / 2 + C.BARRIER_BASE + 0.3)
+        band = _union_buffer([(r.P[rows], o + step * 0.75)
+                              for rows in G.runs(G.seg(r.tunnel, r.closed), r.closed)])
+        near = _inside(band, center)
+        if not near.any():
+            continue
+        _, k = cKDTree(r.P[r.tunnel]).query(center[near])
+        zt = r.z[r.tunnel][k]
+        hit = (fz[near].min(1) < zt + C.TUNNEL_HEIGHT + 0.3) & (fz[near].max(1) > zt - 0.5)
+        drop[np.flatnonzero(near)[hit]] = True
+    faces = faces[~drop].tolist()
     m = G.Mesh()
     m.add(np.column_stack([grid, Z]), faces)
     return m
