@@ -23,7 +23,7 @@ DASH_GAP = 12.0
 MARK_LIFT = 0.01
 
 # 壁高欄（コンクリート製）
-BARRIER_HEIGHT = 1.10
+BARRIER_HEIGHT = 0.90       # PLATEAU の実測（路面から上端まで）の中央値 約0.9m
 BARRIER_BASE = 0.50
 BARRIER_TOP = 0.20
 

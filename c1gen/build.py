@@ -18,6 +18,7 @@ from . import config as C
 from . import dem as dem_mod
 from . import geom as G
 from . import osm
+from . import plateau as PL
 from . import sections as S
 from .proj import to_latlon
 from .route import Route, _gauss, _limit_grade, loop_profile, ramp_profile
@@ -63,11 +64,24 @@ def _deck_polygon(route, extra=C.BARRIER_BASE):
     return _union_buffer(pieces)
 
 
-def make_routes(loops_raw, ramps_raw, dem):
+def make_routes(loops_raw, ramps_raw, dem, pl=None):
+    """pl（PLATEAU）があれば、路面の高さを実測に合わせる。"""
     loops = []
-    for lp in loops_raw:
+    for li, lp in enumerate(loops_raw):
         r = Route(lp["name"], lp["pts"], lp["attrs"], closed=True)
+        r.P0 = r.P.copy()
         loop_profile(r, dem)
+        if pl is not None:
+            prior = r.z.copy()
+            PL.fit_profile(r, pl)
+            # 平面位置を実測の路面の端に合わせてから、高さをもう一度拾い直す
+            near = np.zeros(len(r.s), bool)
+            for rr in ramps_raw:
+                if rr["loop"] == li and len(rr["pts"]):
+                    near[np.argmin(np.linalg.norm(r.P - rr["pts"][0], axis=1))] = True
+            r.plan_shift = PL.fit_plan(r, pl, S.dilate(near, 150.0, r.step, True))
+            r.set_profile(r.ground, prior)
+            r.coverage = PL.fit_profile(r, pl)
         loops.append(r)
     _separate_twins(loops)
     ramps = []
@@ -86,6 +100,8 @@ def make_routes(loops_raw, ramps_raw, dem):
         fade = np.clip(1 - r.s / 60.0, 0, 1)[:, None]
         r.move(r.P + main.shift[j] * fade)
         ramp_profile(r, dem, main.z[j])
+        if pl is not None:
+            PL.fit_profile(r, pl, z_start=main.z[j])
         k = min(len(r.P) - 1, int(60 / r.step))
         r.kind = rr["kind"]
         r.main = main
@@ -104,9 +120,9 @@ def _separate_twins(loops, iters=3):
 
     OSM の上下線は実際より近く描かれていることがあり、そのままだと相手の壁高欄が車線に入る。
     """
-    orig = [r.P.copy() for r in loops]
+    orig = [getattr(r, "P0", r.P).copy() for r in loops]
     for r in loops:
-        r.shift = np.zeros_like(r.P)
+        r.shift = r.P - getattr(r, "P0", r.P)
     if len(loops) != 2:
         return
     _stack_tunnels(loops)
@@ -495,10 +511,14 @@ def main():
     loops_raw, ramps_raw = osm.load(osm_path)
     if len(loops_raw) != 2:
         print(f"警告: 周回が {len(loops_raw)} 本見つかりました（内回り・外回りの 2 本を想定）")
-    loops, ramps = make_routes(loops_raw, ramps_raw, dem)
+    pl = PL.Plateau.load(os.path.join(DATA, "plateau_c1.npz"))
+    if pl is None:
+        print("PLATEAU のデータ（data/plateau_c1.npz）が無いので、高さは推定値で作ります")
+    loops, ramps = make_routes(loops_raw, ramps_raw, dem, pl)
     for r in loops:
         print(f"{DIR_JA.get(r.name, r.name)}: {r.length / 1000:.2f} km, 高架 {r.elevated.mean():.0%}, "
-              f"トンネル {r.tunnel.mean():.0%}, 掘割 {r.cutting.mean():.0%}")
+              f"トンネル {r.tunnel.mean():.0%}, 掘割 {r.cutting.mean():.0%}"
+              + (f", 実測の高さ {r.coverage:.0%}" if hasattr(r, "coverage") else ""))
     print(f"分岐 {sum(q.kind == 'diverge' for q in ramps)} 本, 合流 {sum(q.kind == 'merge' for q in ramps)} 本")
 
     layers, texts = build_scene(loops, ramps, os.path.join(DATA, "osm_water.json"))

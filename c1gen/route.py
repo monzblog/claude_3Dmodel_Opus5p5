@@ -109,7 +109,9 @@ class Route:
         self.z = np.asarray(z, float)
         clear = self.z - self.ground
         self.elevated = clear > config.ELEVATED_MIN
-        self.tunnel = self.z + config.TUNNEL_HEIGHT + config.TUNNEL_COVER_MIN < self.ground
+        # 地面より十分深い所に加え、OSM でトンネルとされ地面より下にある所もトンネル（土かぶりが薄い所）
+        self.tunnel = (self.z + config.TUNNEL_HEIGHT + config.TUNNEL_COVER_MIN < self.ground) | (
+            self.tunnel_tag & (self.z < self.ground - 2.0))
         self.cutting = (self.z < self.ground - 0.5) & ~self.tunnel
 
 
