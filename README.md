@@ -43,3 +43,11 @@ python tools/preview.py output/C1_loop.blend output/preview  # 確認用の画�
 - `output/C1_loop_lanes.json`: 各車線の中心線の点列（シミュレータで自車位置や車線を扱うとき用）
 
 寸法などは `c1gen/config.py` で変えられます。
+
+## データの出典
+
+- 道路・川: © OpenStreetMap contributors（ODbL）
+- 標高: 国土地理院 基盤地図情報 数値標高モデル（地理院タイル）
+- 実測の路面・橋・トンネルの形（`data/plateau_c1.npz`）: 3D都市モデル（Project PLATEAU）首都高速道路（2023年度）国土交通省、政府標準利用規約2.0（CC BY 4.0互換）を加工して作成
+
+`data/plateau_c1.npz` は、PLATEAU の CityGML（`13_tokyo_tran-mlit_2023_citygml_1_op.zip` を `data/plateau/` に展開したもの）から `python tools/plateau_extract.py` で作ります。
