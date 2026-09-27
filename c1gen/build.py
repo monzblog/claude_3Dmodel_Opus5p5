@@ -20,7 +20,7 @@ from . import geom as G
 from . import osm
 from . import sections as S
 from .proj import to_latlon
-from .route import Route, _gauss, loop_profile, ramp_profile
+from .route import Route, _gauss, _limit_grade, loop_profile, ramp_profile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
@@ -106,6 +106,7 @@ def _separate_twins(loops, iters=3):
         r.shift = np.zeros_like(r.P)
     if len(loops) != 2:
         return
+    _stack_tunnels(loops)
     for _ in range(iters):
         shifts = []
         for a, b in (loops, loops[::-1]):
@@ -123,6 +124,25 @@ def _separate_twins(loops, iters=3):
             r.move(r.P + sm * min(gain, 3.0))
     for r, p in zip(loops, orig):
         r.shift = r.P - p
+
+
+def _stack_tunnels(loops):
+    """上下2段に重なるトンネルで、下の段の天井が上の段の路面に届く所は、下の段を深くする。"""
+    a, b = loops
+    need_dz = C.TUNNEL_HEIGHT + 1.5
+    for lo, hi in ((a, b), (b, a)):
+        d, k = cKDTree(hi.P).query(lo.P)
+        wide = G.half_width(lo) + G.half_width(hi)[k] + 2 * C.BARRIER_BASE + 0.1
+        dz = hi.z[k] - lo.z
+        tun = lo.tunnel | hi.tunnel[k]
+        deficit = np.where((d < wide) & tun & (dz >= C.TWIN_DZ) & (dz < need_dz), need_dz - dz, 0.0)
+        if not deficit.any():
+            continue
+        # 前後にも広げて滑らかに下げ、勾配の上限を守る
+        sm = _gauss(deficit, 30.0 / lo.step, lo.closed)
+        sm *= deficit.max() / max(sm.max(), 1e-6)
+        z = _limit_grade(lo.z - np.maximum(sm, deficit), lo.step, lo.closed)
+        lo.set_profile(lo.ground, z)
 
 
 def _dedupe_ramps(ramps, tol=1.5):
