@@ -125,19 +125,25 @@ def ramp_profile(route, dem, z0):
     route.set_profile(ground, z)
 
 
-def _limit_grade(z, step, closed, iters=200):
+def _limit_grade(z, step, closed):
+    """隣り合う点の高さの差を MAX_GRADE*step 以内にする。
+
+    z 以下で勾配制限を満たす最大の形と、z 以上で満たす最小の形の平均を取る。
+    どちらも勾配が上限以内なので平均も上限以内になり、元の形からのずれも左右対称になる。
+    """
     lim = config.MAX_GRADE * step
-    z = z.copy()
-    for _ in range(iters):
-        nxt = np.roll(z, -1) if closed else np.append(z[1:], z[-1])
-        d = nxt - z
-        over = np.abs(d) > lim
-        if not over.any():
-            break
-        corr = np.where(over, (np.abs(d) - lim) * np.sign(d) / 2, 0)
-        z += corr
-        if closed:
-            z -= np.roll(corr, 1)
-        else:
-            z[1:] -= corr[:-1]
-    return z
+    z = np.asarray(z, float)
+    n = len(z)
+
+    def envelope(sign):
+        e = (z * sign).tolist()
+        # 閉じた周回は2周分なぞれば回り込みも伝わる
+        rounds = 2 if closed else 1
+        for _ in range(rounds):
+            for i in range(1 if not closed else 0, n):
+                e[i] = min(e[i], e[i - 1] + lim)
+            for i in range(n - 2 if not closed else n - 1, -1, -1):
+                e[i] = min(e[i], e[(i + 1) % n] + lim)
+        return np.array(e) * sign
+
+    return (envelope(1) + envelope(-1)) / 2
