@@ -93,7 +93,10 @@ def make_routes(loops_raw, ramps_raw, dem):
         r.side = 1 if np.dot(r.P[k] - main.P[j], main.N[j]) >= 0 else -1
         r.destination = rr["destination"]
         ramps.append(r)
-    return loops, _dedupe_ramps(ramps)
+    ramps = _dedupe_ramps(ramps)
+    for r in loops + ramps:
+        r.bank = S.superelevation(r)
+    return loops, ramps
 
 
 def _separate_twins(loops, iters=3):

@@ -80,7 +80,7 @@ def sweep(mesh, route, lat, dz, segmask, zoff=None):
     for rows in runs(segmask, route.closed):
         R = len(rows)
         xy = route.P[rows, None, :] + route.N[rows, None, :] * lat[rows, :, None]
-        zz = z[rows, None] + dz[rows]
+        zz = z[rows, None] + route.bank[rows, None] * lat[rows] + dz[rows]
         verts = np.concatenate([xy, zz[..., None]], -1).reshape(-1, 3)
         idx = np.arange(R * K).reshape(R, K)
         a, b, c, d = idx[:-1, :-1], idx[1:, :-1], idx[1:, 1:], idx[:-1, 1:]
@@ -100,14 +100,16 @@ def _side_profile(side, lat, dz):
     return -lat[..., ::-1], dz[..., ::-1]
 
 
-def box(mesh, center_xy, fwd, half_l, half_w, zb, zt):
+def box(mesh, center_xy, fwd, half_l, half_w, zb, zt, tilt=0.0):
+    """tilt: 左へ 1m で上がる高さ。路面の横断勾配に合わせて底と上面を傾ける。"""
     f = np.asarray(fwd, float)
     f = f / np.linalg.norm(f)
     l = np.array([-f[1], f[0]])
     c = np.asarray(center_xy, float)
     corners = [c - f * half_l - l * half_w, c + f * half_l - l * half_w,
                c + f * half_l + l * half_w, c - f * half_l + l * half_w]
-    verts = [(*p, zb) for p in corners] + [(*p, zt) for p in corners]
+    side = [-half_w, -half_w, half_w, half_w]
+    verts = [(*p, zb + tilt * y) for p, y in zip(corners, side)] + [(*p, zt + tilt * y) for p, y in zip(corners, side)]
     faces = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]]
     mesh.add(verts, faces)
 
@@ -236,9 +238,10 @@ def portals(mesh, route, mask):
         o = tunnel_offset(route)[i]
         zb = route.z[i] + C.TUNNEL_HEIGHT
         zt = max(route.ground[i] + 0.5, zb + 1.0)
-        box(mesh, route.P[i], route.T[i], 0.4, o + 0.6, zb, zt)
+        box(mesh, route.P[i], route.T[i], 0.4, o + 0.6, zb, zt, tilt=route.bank[i])
         for side in (1, -1):
-            box(mesh, route.P[i] + route.N[i] * side * (o + 0.3), route.T[i], 0.4, 0.3, route.z[i], zb)
+            y = side * (o + 0.3)
+            box(mesh, route.P[i] + route.N[i] * y, route.T[i], 0.4, 0.3, route.zat(i, y), route.zat(i, y) + C.TUNNEL_HEIGHT)
 
 
 def retaining_wall(mesh, route, side, segmask):
@@ -294,7 +297,7 @@ def slow_dots(mesh, route, progress):
             left = h[i] - C.SHOULDER_LEFT - j * C.LANE_WIDTH
             for y in (left - 0.25 - 0.45 * k, left - C.LANE_WIDTH + 0.25 + 0.45 * k):
                 box(mesh, route.P[i] + route.N[i] * y, route.T[i], 0.15, 0.15,
-                    route.z[i], route.z[i] + C.MARK_LIFT * 1.5)
+                    route.zat(i, y), route.zat(i, y) + C.MARK_LIFT * 1.5)
 
 
 def lane_centers(route):
@@ -304,7 +307,7 @@ def lane_centers(route):
     for j in range(1, int(route.lanes.max()) + 1):
         y = h - C.SHOULDER_LEFT - (j - 0.5) * C.LANE_WIDTH
         xy = route.P + route.N * y[:, None]
-        pts = np.column_stack([xy, route.z])
+        pts = np.column_stack([xy, route.z + route.bank * y])
         pts[route.lanes < j] = np.nan
         out.append(pts)
     return out
@@ -320,7 +323,9 @@ def piers(mesh, route, blocked=None):
         if not route.elevated[i]:
             continue
         top = route.z[i] - C.DECK_THICKNESS
-        box(mesh, route.P[i], route.T[i], 0.9, h[i] + C.BARRIER_BASE - 0.3, top - C.CROSSBEAM_DEPTH, top)
+        box(mesh, route.P[i], route.T[i], 0.9, h[i] + C.BARRIER_BASE - 0.3, top - C.CROSSBEAM_DEPTH, top,
+            tilt=route.bank[i])
+        top -= abs(route.bank[i]) * (h[i] + C.BARRIER_BASE)
         col_top = top - C.CROSSBEAM_DEPTH
         if col_top - route.ground[i] < 0.5:
             continue
@@ -340,8 +345,9 @@ def tunnel_lights(mesh, route):
         if not route.tunnel[i]:
             continue
         for side in (1, -1):
-            box(mesh, route.P[i] + route.N[i] * side * (o[i] - 0.2), route.T[i], C.TUNNEL_LIGHT_LEN / 2, 0.15,
-                route.z[i] + C.TUNNEL_HEIGHT - 0.9, route.z[i] + C.TUNNEL_HEIGHT - 0.7)
+            y = side * (o[i] - 0.2)
+            z = route.zat(i, y) + C.TUNNEL_HEIGHT
+            box(mesh, route.P[i] + route.N[i] * y, route.T[i], C.TUNNEL_LIGHT_LEN / 2, 0.15, z - 0.9, z - 0.7)
 
 
 def tunnel_equipment(boxes, red, green, fans, route):
@@ -352,20 +358,21 @@ def tunnel_equipment(boxes, red, green, fans, route):
     for i in range(0, n, every):
         if not route.tunnel[i]:
             continue
-        p, nn, t, z = route.P[i], route.N[i], route.T[i], route.z[i]
+        p, nn, t, z = route.P[i], route.N[i], route.T[i], route.zat(i, o[i])
         box(boxes, p + nn * (o[i] - 0.12), t, 0.45, 0.12, z + 0.5, z + 1.9)
         box(red, p + nn * (o[i] - 0.25), t, 0.12, 0.02, z + 2.0, z + 2.2)
         j = (i + every // 2) % n
         if route.tunnel[j]:
             for side in (1, -1):
-                box(green, route.P[j] + route.N[j] * side * (o[j] - 0.03), route.T[j], 0.25, 0.03,
-                    route.z[j] + 0.9, route.z[j] + 1.1)
+                y = side * (o[j] - 0.03)
+                box(green, route.P[j] + route.N[j] * y, route.T[j], 0.25, 0.03,
+                    route.zat(j, y) + 0.9, route.zat(j, y) + 1.1)
     every = max(1, int(round(C.JETFAN_SPACING / route.step)))
     for i in range(every // 2, n, every):
         if not route.tunnel[i]:
             continue
         for y in (-1.6, 1.6):
-            cylinder(fans, route.P[i] + route.N[i] * y, route.T[i], 0.55, 2.0, route.z[i] + C.TUNNEL_HEIGHT - 0.8)
+            cylinder(fans, route.P[i] + route.N[i] * y, route.T[i], 0.55, 2.0, route.zat(i, y) + C.TUNNEL_HEIGHT - 0.8)
 
 
 def light_poles(poles, lamps, route, skip=None, blocked=None):
@@ -376,7 +383,7 @@ def light_poles(poles, lamps, route, skip=None, blocked=None):
         if route.tunnel[i] or (skip is not None and skip[i]):
             continue
         e = h[i] + C.BARRIER_BASE / 2
-        base = route.z[i] + C.BARRIER_HEIGHT
+        base = route.zat(i, e) + C.BARRIER_HEIGHT
         top = base + C.LIGHT_POLE_HEIGHT
         p, n, t = route.P[i], route.N[i], route.T[i]
         if blocked is not None and blocked(route, p + n * (e - C.LIGHT_ARM / 2), base, top + C.DECK_THICKNESS + 0.5):
@@ -394,13 +401,14 @@ def gantry(frames, panels, texts, route, i, lines, side):
     p, n, t, z = route.P[i], route.N[i], route.T[i], route.z[i]
     post = h + C.BARRIER_BASE + 0.6
     top = z + C.SIGN_CLEARANCE + 2.9
+    top += abs(route.bank[i]) * post
     for o in (post, -post):
-        box(frames, p + n * o, t, 0.2, 0.2, z, top)
+        box(frames, p + n * o, t, 0.2, 0.2, route.zat(i, o), top)
     box(frames, p, t, 0.25, post, top - 0.5, top - 0.1)
     width = min(2 * h - 1.0, 7.0)
     center = p + n * side * max(0.0, h - width / 2 - 0.5)
     ph = 2.5
-    zb = z + C.SIGN_CLEARANCE
+    zb = z + C.SIGN_CLEARANCE + abs(route.bank[i]) * h
     box(panels, center, t, 0.05, width / 2, zb, zb + ph)
     face = np.append(center - t * 0.07, 0.0)
     size = min(0.7, ph / (len(lines) + 0.6))
@@ -414,7 +422,7 @@ def speed_sign(posts, red, white, texts, route, i, limit):
     h = half_width(route)[i]
     p, n, t, z = route.P[i], route.N[i], route.T[i], route.z[i]
     e = h + C.BARRIER_BASE / 2
-    base = z + C.BARRIER_HEIGHT
+    base = route.zat(i, e) + C.BARRIER_HEIGHT
     box(posts, p + n * e, t, 0.04, 0.04, base, base + 2.2)
     c = np.append(p + n * e - t * 0.06, base + 2.2)
     disk(red, c, -t, 0.30)
@@ -427,7 +435,7 @@ def warning_sign(posts, yellow, texts, route, i, side, text):
     h = half_width(route)[i]
     p, n, t, z = route.P[i], route.N[i], route.T[i], route.z[i]
     e = side * (h + C.BARRIER_BASE / 2)
-    base = z + C.BARRIER_HEIGHT
+    base = route.zat(i, e) + C.BARRIER_HEIGHT
     box(posts, p + n * e, t, 0.04, 0.04, base, base + 2.0)
     c = np.append(p + n * e - t * 0.06, base + 2.0)
     diamond(yellow, c, -t, 0.45)
@@ -452,7 +460,7 @@ def sound_wall(panels, clear, posts, route, segmask, side=1):
         if not m[i]:
             continue
         o = side * (e[i, 0] + 0.05)
-        box(posts, route.P[i] + route.N[i] * o, route.T[i], 0.1, 0.1, route.z[i] + z0, route.z[i] + z2 + 0.1)
+        box(posts, route.P[i] + route.N[i] * o, route.T[i], 0.1, 0.1, route.zat(i, o) + z0, route.zat(i, o) + z2 + 0.1)
     # 上端の笠木
     lat, dz = _side_profile(side, np.hstack([e - 0.1, e + 0.15]), np.broadcast_to([z2 + 0.1, z2 + 0.1], (len(e), 2)))
     sweep(posts, route, lat, dz, segmask)
@@ -470,8 +478,9 @@ def rail_fence(mesh, route, segmask, side=1):
     every = max(1, int(round(C.RAIL_POST_SPACING / route.step)))
     for i in range(0, len(m), every):
         if m[i]:
+            zb = route.zat(i, side * e[i]) + H
             box(mesh, route.P[i] + route.N[i] * side * e[i], route.T[i], 0.05, 0.05,
-                route.z[i] + H, route.z[i] + H + max(C.RAIL_HEIGHTS) + 0.05)
+                zb, zb + max(C.RAIL_HEIGHTS) + 0.05)
 
 
 def delineators(white, orange, route, mask_left, mask_right):
@@ -483,8 +492,8 @@ def delineators(white, orange, route, mask_left, mask_right):
             if not m[i]:
                 continue
             y = side * (h[i] + 0.05)
-            box(mesh, route.P[i] + route.N[i] * y, route.T[i], 0.03, 0.05,
-                route.z[i] + C.BARRIER_HEIGHT - 0.25, route.z[i] + C.BARRIER_HEIGHT - 0.12)
+            zt = route.zat(i, y) + C.BARRIER_HEIGHT
+            box(mesh, route.P[i] + route.N[i] * y, route.T[i], 0.03, 0.05, zt - 0.25, zt - 0.12)
 
 
 def chevrons(mesh, route, curv, mask):
@@ -496,7 +505,7 @@ def chevrons(mesh, route, curv, mask):
             continue
         side = -1 if curv[i] > 0 else 1  # 左カーブなら外側は右
         y = side * (h[i] + 0.02)
-        c = np.append(route.P[i] + route.N[i] * y, route.z[i] + C.BARRIER_HEIGHT + 0.45)
+        c = np.append(route.P[i] + route.N[i] * y, route.zat(i, y) + C.BARRIER_HEIGHT + 0.45)
         # 矢印はカーブの向き（左カーブなら左向き）
         plate(mesh, c, -route.T[i], 0.30, 0.45, flip=curv[i] > 0)
 
@@ -507,7 +516,8 @@ def joints(mesh, route, mask):
     h = half_width(route)
     for i in range(every // 2, len(route.s), every):
         if mask[i]:
-            box(mesh, route.P[i], route.T[i], 0.12, h[i], route.z[i] - 0.01, route.z[i] + C.MARK_LIFT * 0.8)
+            box(mesh, route.P[i], route.T[i], 0.12, h[i], route.z[i] - 0.01, route.z[i] + C.MARK_LIFT * 0.8,
+                tilt=route.bank[i])
 
 
 def cushion_drums(mesh, center_xy, fwd, z, count=3):

@@ -58,6 +58,7 @@ class Route:
         self.cutting_tag = np.array([attrs[i]["cutting"] for i in seg_idx], bool)
         self.layer = np.array([attrs[i]["layer"] for i in seg_idx], int)
         self._frames()
+        self.bank = np.zeros(len(s))  # 横断勾配（左へ 1m 進むと上がる高さ）。build でカーブから決める
         width = (
             self.lanes * config.LANE_WIDTH + config.SHOULDER_LEFT + config.SHOULDER_RIGHT
         ).astype(float)
@@ -74,10 +75,14 @@ class Route:
     def truncate(self, n):
         """先頭から n 点だけ残す（開いたルート用）。"""
         for k in ("s", "P", "lanes", "bridge", "tunnel_tag", "cutting_tag", "layer", "width", "lat", "lon",
-                  "T", "N", "ground", "z", "elevated", "tunnel", "cutting"):
+                  "T", "N", "ground", "z", "bank", "elevated", "tunnel", "cutting"):
             if hasattr(self, k):
                 setattr(self, k, getattr(self, k)[:n])
         self.length = float(self.s[-1])
+
+    def zat(self, i, y):
+        """i 番目の断面で、中心から左へ y の位置の路面の高さ（横断勾配込み）。"""
+        return self.z[i] + self.bank[i] * y
 
     def _frames(self):
         P = self.P

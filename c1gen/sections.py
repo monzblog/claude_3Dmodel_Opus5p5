@@ -61,6 +61,28 @@ def curvature(route):
     return np.convolve(pad, ker, mode="valid")
 
 
+def superelevation(route, speed=None):
+    """横断勾配 bank（左へ 1m 進むと上がる高さ）を曲率から決める。
+
+    直線と緩い右カーブは路肩側（左）へ CROSS_SLOPE 下げたまま。
+    必要な片勾配が CROSS_SLOPE を超えるカーブは内側へ下げる（右カーブなら左が上がる）。
+    """
+    if speed is None:
+        speed = C.DESIGN_SPEED if route.closed else C.RAMP_DESIGN_SPEED
+    k = curvature(route)
+    need = C.CANT_FACTOR * speed ** 2 * np.abs(k) / 127.0
+    e = np.clip(need, C.CROSS_SLOPE, C.MAX_CANT)
+    bank = np.where(k > 0, -e, np.where(need > C.CROSS_SLOPE, e, -C.CROSS_SLOPE))
+    sigma = C.CANT_TRANSITION / 3 / route.step
+    r = int(3 * sigma)
+    if r == 0:
+        return bank
+    ker = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    ker /= ker.sum()
+    pad = np.concatenate([bank[-r:], bank, bank[:r]]) if route.closed else np.pad(bank, r, mode="edge")
+    return np.convolve(pad, ker, mode="valid")
+
+
 def dilate(mask, meters, step, closed):
     n = int(meters / step)
     out = mask.copy()

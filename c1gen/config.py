@@ -27,6 +27,15 @@ BARRIER_HEIGHT = 1.10
 BARRIER_BASE = 0.50
 BARRIER_TOP = 0.20
 
+# 横断勾配（片勾配）。直線は左（路肩側）へ 2% 下げて排水し、カーブは内側へ下げる。
+# 片勾配 ≈ 設計速度²/(127R) × CANT_FACTOR を CROSS_SLOPE〜MAX_CANT に収める（都市部の上限 6%）
+CROSS_SLOPE = 0.02
+MAX_CANT = 0.06
+DESIGN_SPEED = 60.0        # km/h（C1 本線の設計速度の目安）
+RAMP_DESIGN_SPEED = 40.0
+CANT_FACTOR = 0.45
+CANT_TRANSITION = 40.0     # 片勾配をすりつける長さ（緩和区間の目安）
+
 # 高架
 DECK_THICKNESS = 2.0
 ELEVATED_MIN = 3.0         # 地面からこれ以上高ければ橋脚を立てる
