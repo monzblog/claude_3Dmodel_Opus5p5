@@ -96,12 +96,12 @@ def make_routes(loops_raw, ramps_raw, dem, pl=None):
         if r.length < 10:
             continue
         j = int(np.argmin(np.linalg.norm(main.P - main.shift - r.P[0], axis=1)))
-        # 本線を押し広げた分だけ、分岐点の近くのランプも一緒に動かす
-        fade = np.clip(1 - r.s / 60.0, 0, 1)[:, None]
-        r.move(r.P + main.shift[j] * fade)
+        # 本線を動かした分だけ、分岐点の近くと、本線に沿って並ぶ所のランプも一緒に動かす
+        d, kk = cKDTree(main.P - main.shift).query(r.P)
+        fade = np.maximum(np.clip(1 - r.s / 60.0, 0, 1), np.clip(1 - (d - 10.0) / 10.0, 0, 1))
+        fade = _gauss(fade, 10.0 / r.step, False)[:, None]
+        r.move(r.P + main.shift[kk] * fade)
         ramp_profile(r, dem, main.z[j])
-        if pl is not None:
-            PL.fit_profile(r, pl, z_start=main.z[j])
         k = min(len(r.P) - 1, int(60 / r.step))
         r.kind = rr["kind"]
         r.main = main
@@ -110,6 +110,17 @@ def make_routes(loops_raw, ramps_raw, dem, pl=None):
         r.destination = rr["destination"]
         ramps.append(r)
     ramps = _dedupe_ramps(ramps)
+    # 高さを実測に合わせてから本線との重なりを調べ、動かしたランプは高さを拾い直す
+    def fit_ramps():
+        if pl is None:
+            return
+        for q in ramps:
+            PL.fit_profile(q, pl, z_start=q.main.z[q.junction], exclude=_over_loops(q, loops))
+
+    fit_ramps()
+    if _separate_ramps(loops, ramps):
+        fit_ramps()
+    _cut_crossing_ramps(loops, ramps)
     for r in loops + ramps:
         r.bank = S.superelevation(r)
     return loops, ramps
@@ -143,6 +154,75 @@ def _separate_twins(loops, iters=3):
             r.move(r.P + sm * min(gain, 3.0))
     for r, p in zip(loops, orig):
         r.shift = r.P - p
+
+
+def _over_loops(q, loops, start=120.0, whole=False):
+    """ランプの各点が本線の路面の上にある時の、その本線の路面の高さ（無ければ NaN）。本線ごとに返す。
+
+    自分の分岐元の本線は、分岐・合流の先端の近く（start より手前）では重なるのが正しいので除く。
+    whole なら、ランプの中心線だけでなく路面の幅のどこかが重なれば重なりとみなす。
+    """
+    out = []
+    for r in loops:
+        d, k = cKDTree(r.P).query(q.P)
+        rel = q.P - r.P[k]
+        lat = np.einsum("ij,ij->i", rel, r.N[k])
+        if whole:
+            # 路面どうしが 0.5m 以上重なる所（隣に並ぶだけの所は含めない）
+            on = np.abs(lat) < G.half_width(r)[k] + G.half_width(q) - 0.5
+        else:
+            on = np.abs(lat) < G.half_width(r)[k] + C.BARRIER_BASE
+        if r is q.main:
+            on &= q.s > start
+        out.append(np.where(on, r.z[k] + r.bank[k] * lat, np.nan))
+    return out
+
+
+def _cut_crossing_ramps(loops, ramps, margin=10.0):
+    """ランプが本線の路面と重なり、高さの差が桁と車の高さ分に足りない所の手前で、ランプを打ち切る。
+
+    分岐・合流部だけを短く作るので、その先の立体交差は作らない（同じ高さで重なるのを防ぐ）。
+    """
+    need = C.DECK_THICKNESS + 4.5
+    for q in ramps:
+        on = np.zeros(len(q.s), bool)
+        for zx in _over_loops(q, loops, whole=True):
+            on |= np.abs(zx - q.z) < need
+        hit = np.flatnonzero(on)
+        if len(hit):
+            q.truncate(max(2, int(hit[0] - margin / q.step)))
+
+
+def _separate_ramps(loops, ramps, start=120.0, full=200.0):
+    """分岐点から離れた所で、ランプが本線の車線に重なっていれば、ランプを本線から離す。
+
+    分岐・合流の先端の近く（start より手前）は本線と重なるのが正しいので動かさない。
+    """
+    trees = [(r, cKDTree(r.P)) for r in loops]
+    moved = False
+    for q in ramps:
+        w = np.clip((q.s - start) / (full - start), 0, 1)
+        if not w.any():
+            continue
+        push = np.zeros_like(q.P)
+        for r, tree in trees:
+            d, k = tree.query(q.P)
+            need = G.half_width(q) + G.half_width(r)[k] + 2 * C.BARRIER_BASE + 0.1
+            short = np.where((d < need) & (np.abs(q.z - r.z[k]) < C.TWIN_DZ), need - d, 0.0) * w
+            away = q.P - r.P[k]
+            n = np.linalg.norm(away, axis=1)
+            # 中心線どうしがほぼ重なる所は、ランプが分かれていく側（本線の左右）へ離す
+            side = np.sign(np.einsum("ij,ij->i", away, r.N[k]))
+            side[side == 0] = q.side
+            away = np.where(n[:, None] > 0.5, away / np.maximum(n, 1e-6)[:, None], r.N[k] * side[:, None])
+            push += away * short[:, None]
+        if np.abs(push).max() < 0.02:
+            continue
+        sm = _gauss(push, 15.0 / q.step, False)
+        gain = np.linalg.norm(push, axis=1).max() / max(np.linalg.norm(sm, axis=1).max(), 1e-6)
+        q.move(q.P + sm * min(gain, 3.0))
+        moved = True
+    return moved
 
 
 def _stack_tunnels(loops):

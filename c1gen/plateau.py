@@ -168,9 +168,16 @@ def _fill(z_meas, prior, closed):
     return out
 
 
-def fit_profile(route, pl, z_start=None, smooth=10.0):
-    """route の縦断を PLATEAU の路面に合わせる。合った点の割合を返す。"""
+def fit_profile(route, pl, z_start=None, smooth=10.0, exclude=None):
+    """route の縦断を PLATEAU の路面に合わせる。合った点の割合を返す。
+
+    exclude は点ごとの「使ってはいけない高さ」（NaN なら無し）。ランプが本線の上を横切る所で、
+    本線の路面の高さに乗ってしまわないようにする。
+    """
     lv = pl.levels(route.P, route.N)
+    if exclude is not None:
+        for zx in exclude:
+            lv = [l if np.isnan(z) else l[np.abs(l - z) > 1.0] for l, z in zip(lv, zx)]
     z_meas = _pick(lv, route.z, route.step, z_start)
     have = ~np.isnan(z_meas)
     z = _fill(z_meas, route.z, route.closed)
