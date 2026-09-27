@@ -186,8 +186,10 @@ def _cut_crossing_ramps(loops, ramps, margin=10.0):
     need = C.DECK_THICKNESS + 4.5
     for q in ramps:
         on = np.zeros(len(q.s), bool)
-        for zx in _over_loops(q, loops, whole=True):
-            on |= np.abs(zx - q.z) < need
+        # 分岐元の本線に沿って並ぶ所は _separate_ramps で離すので、ここでは他の本線だけを見る
+        for r, zx in zip(loops, _over_loops(q, loops, whole=True)):
+            if r is not q.main:
+                on |= np.abs(zx - q.z) < need
         hit = np.flatnonzero(on)
         if len(hit):
             q.truncate(max(2, int(hit[0] - margin / q.step)))
