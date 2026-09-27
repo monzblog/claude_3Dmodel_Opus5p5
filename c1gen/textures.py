@@ -94,6 +94,25 @@ def cushion_drum(w=128, h=128):
 
 
 # 名前: (作る関数, 1枚が u 方向に何m, v 方向に何m)
+def facade(wall, glass, win_w=0.6, win_h=0.55, w=256, h=150, seed=0):
+    """ビルの外壁（1枚 = 横 6m・1階分）。窓 2 つ、ガラスは少しずつ明るさを変える。
+
+    win_w, win_h は窓が 1 区画に占める割合。
+    """
+    rng = np.random.default_rng(seed)
+    img = np.ones((h, w, 3)) * np.asarray(wall, float)
+    img *= (1 + 0.04 * _noise(h, w, 6, rng))[..., None]
+    for k in range(2):
+        x0 = int((k + (1 - win_w) / 2) * w / 2)
+        x1 = int((k + (1 + win_w) / 2) * w / 2)
+        y0 = int(h * (1 - win_h) * 0.6)
+        y1 = y0 + int(h * win_h)
+        tone = np.asarray(glass, float) * (0.85 + 0.3 * rng.random())
+        grad = np.linspace(1.15, 0.85, y1 - y0)[:, None, None]
+        img[y0:y1, x0:x1] = tone * grad
+    return _rgba(img)
+
+
 TILES = {
     "Asphalt": (asphalt, 6.0, 6.0),
     "RedPavement": (red_pavement, 4.0, 4.0),
@@ -104,4 +123,8 @@ TILES = {
     "TunnelTileDirty": (lambda: tunnel_tile(dirty=True), 2.0, 1.0),
     "Chevron": (chevron, 1.0, 1.0),
     "CushionDrum": (cushion_drum, 3.0, 1.0),
+    "FacadeGlass": (lambda: facade((0.55, 0.57, 0.6), (0.22, 0.3, 0.38), win_w=0.9, win_h=0.8, seed=1), 6.0, 3.5),
+    "FacadeBeige": (lambda: facade((0.74, 0.68, 0.57), (0.14, 0.17, 0.21), seed=2), 6.0, 3.5),
+    "FacadeGray": (lambda: facade((0.6, 0.6, 0.6), (0.16, 0.19, 0.23), win_w=0.7, seed=3), 6.0, 3.5),
+    "FacadeDark": (lambda: facade((0.26, 0.26, 0.28), (0.3, 0.36, 0.42), win_w=0.8, win_h=0.7, seed=4), 6.0, 3.5),
 }

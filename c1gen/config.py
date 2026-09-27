@@ -117,3 +117,7 @@ JOINT_SPACING = 40.0         # 高架の伸縮継手
 DELINEATOR_SPACING = 10.0    # 壁高欄の上の視線誘導標
 CHEVRON_SPACING = 16.0
 GORE_ZEBRA_SPACING = 3.0
+
+# ---- 紹介動画の背景 ------------------------------------------------------
+BUILDING_RADIUS = 350.0      # C1 からこの距離までの建物を置く
+FLOOR_HEIGHT = 3.5           # building:levels から高さを出す時の 1 階分

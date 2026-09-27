@@ -1,6 +1,9 @@
 """国土地理院の標高タイル（テキスト形式）の取得と標高の補間。
 
 dem5a（5mメッシュ, z15）を優先し、欠けている所は dem（10mメッシュ, z14）で埋める。
+
+タイルのフォルダ（data/dem/）の代わりに、pack() でまとめた data/dem.npz（cm 単位の整数、
+リポジトリに入れられる大きさ）からも読める。地理院に届かない環境（クラウド）用。
 """
 import math
 import os
@@ -47,6 +50,27 @@ def fetch(root, bbox=config.BBOX):
                 time.sleep(0.2)
 
 
+NODATA = -32768
+
+
+def pack(root, out):
+    """タイルのフォルダを 1 つの npz にまとめる（標高は cm 単位の int16、データ無しは NODATA）。"""
+    arrays = {}
+    for name, z in SOURCES:
+        base = os.path.join(root, name, str(z))
+        if not os.path.isdir(base):
+            continue
+        for x in os.listdir(base):
+            for fn in os.listdir(os.path.join(base, x)):
+                t = _load_tile(os.path.join(base, x, fn))
+                if t is None:
+                    continue
+                v = np.where(np.isnan(t), NODATA, np.round(t * 100)).astype(np.int16)
+                arrays[f"{name}/{z}/{x}/{fn[:-4]}"] = v
+    np.savez_compressed(out, **arrays)
+    return len(arrays)
+
+
 def _load_tile(path):
     if not os.path.exists(path):
         return None
@@ -65,14 +89,25 @@ class DEM:
         self.root = root
         self.fallback = fallback
         self._cache = {}
-        self.available = any(
+        self._packed = None
+        if os.path.exists(root + ".npz") and not any(os.path.isdir(os.path.join(root, n)) for n, _ in SOURCES):
+            self._packed = np.load(root + ".npz")
+        self.available = self._packed is not None or any(
             os.path.isdir(os.path.join(root, name)) for name, _ in SOURCES
         )
 
     def _tile(self, name, z, x, y):
         key = (name, z, x, y)
         if key not in self._cache:
-            self._cache[key] = _load_tile(_tile_path(self.root, name, z, x, y))
+            if self._packed is not None:
+                k = f"{name}/{z}/{x}/{y}"
+                t = self._packed[k].astype(float) if k in self._packed.files else None
+                if t is not None:
+                    t[t == NODATA] = np.nan
+                    t /= 100.0
+                self._cache[key] = t
+            else:
+                self._cache[key] = _load_tile(_tile_path(self.root, name, z, x, y))
         return self._cache[key]
 
     def _sample_source(self, name, z, lat, lon):
