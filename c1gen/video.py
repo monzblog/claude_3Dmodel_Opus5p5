@@ -123,7 +123,7 @@ def animate(cam, eye, tgt, bank, roll_gain=0.6):
         cam.keyframe_insert("rotation_quaternion", frame=f + 1)
 
 
-def render_settings(scene, engine, res, scale, fps, frames, out):
+def render_settings(scene, engine, res, scale, fps, frames, out, samples=8):
     scene.render.resolution_x, scene.render.resolution_y = res
     scene.render.resolution_percentage = int(scale * 100)
     scene.render.fps = fps
@@ -135,12 +135,16 @@ def render_settings(scene, engine, res, scale, fps, frames, out):
         scene.display.shading.show_shadows = True
     elif engine == "cycles":
         scene.render.engine = "CYCLES"
-        scene.cycles.samples = 32
+        scene.cycles.samples = max(samples, 16)
         scene.cycles.use_denoising = True
     else:
         scene.render.engine = "BLENDER_EEVEE"
         if hasattr(scene, "eevee"):
-            scene.eevee.taa_render_samples = 32
+            # 動くカメラでは少ないサンプルでも目立たない。1 コマの時間はほぼサンプル数に比例する
+            scene.eevee.taa_render_samples = samples
+            for attr in ("use_raytracing", "use_gtao"):
+                if hasattr(scene.eevee, attr):
+                    setattr(scene.eevee, attr, False)
     scene.render.filepath = out
     ims = scene.render.image_settings
     if hasattr(ims, "media_type"):
@@ -154,7 +158,7 @@ def render_settings(scene, engine, res, scale, fps, frames, out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--loop", default="Inner", help="Inner（内回り）か Outer（外回り）")
-    ap.add_argument("--start", type=float, default=7.95, help="走り始める位置（周回の起点からの km）")
+    ap.add_argument("--start", type=float, default=8.85, help="走り始める位置（周回の起点からの km）")
     ap.add_argument("--seconds", type=float, default=40.0)
     ap.add_argument("--speed", type=float, default=70.0, help="km/h")
     ap.add_argument("--lane", type=int, default=2, help="1 = 一番左の車線")
@@ -162,6 +166,7 @@ def main():
     ap.add_argument("--res", default="1080x1920")
     ap.add_argument("--scale", type=float, default=1.0, help="解像度の倍率（確認用に小さくする）")
     ap.add_argument("--engine", default="eevee", choices=("eevee", "cycles", "workbench"))
+    ap.add_argument("--samples", type=int, default=8, help="EEVEE のサンプル数（多いほどきれいで遅い）")
     ap.add_argument("--stills", default="", help="この番号のコマだけ PNG で描く（例: 0,400,800）")
     ap.add_argument("--blend", default=os.path.join(OUT, "C1_loop.blend"))
     ap.add_argument("--out", default=os.path.join(OUT, "C1_drive.mp4"))
@@ -186,7 +191,7 @@ def main():
     animate(cam, eye, tgt, bank)
 
     res = tuple(int(v) for v in args.res.split("x"))
-    render_settings(scene, args.engine, res, args.scale, args.fps, len(eye), args.out)
+    render_settings(scene, args.engine, res, args.scale, args.fps, len(eye), args.out, args.samples)
     showcase = os.path.join(os.path.dirname(args.out), "C1_showcase.blend")
     bpy.ops.wm.save_as_mainfile(filepath=showcase, compress=True)
     print(f"保存しました: {showcase}")
