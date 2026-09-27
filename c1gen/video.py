@@ -124,8 +124,9 @@ def animate(cam, eye, tgt, bank, roll_gain=0.6):
 
 
 def render_settings(scene, engine, res, scale, fps, frames, out, samples=8):
-    scene.render.resolution_x, scene.render.resolution_y = res
-    scene.render.resolution_percentage = int(scale * 100)
+    # H.264 は幅と高さが偶数でないと書き出せないので、倍率を掛けた後で偶数にそろえる
+    scene.render.resolution_x, scene.render.resolution_y = (int(round(v * scale / 2)) * 2 for v in res)
+    scene.render.resolution_percentage = 100
     scene.render.fps = fps
     scene.frame_start, scene.frame_end = 1, frames
     if engine == "workbench":
